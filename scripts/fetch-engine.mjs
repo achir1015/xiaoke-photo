@@ -43,7 +43,13 @@ async function main() {
     return;
   }
   console.log('下載引擎', REMOTE.url);
-  const res = await fetch(REMOTE.url);
+  // 剛上傳的 Release 檔案可能要等一下才查得到
+  let res;
+  for (let i = 0; i < 6; i++) {
+    res = await fetch(REMOTE.url);
+    if (res.ok) break;
+    await new Promise((r) => setTimeout(r, 10000));
+  }
   if (!res.ok) throw new Error(`下載失敗 ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   const sha = crypto.createHash('sha256').update(buf).digest('hex');
