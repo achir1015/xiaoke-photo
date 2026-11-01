@@ -1,4 +1,8 @@
-# 小柯機器人圖像編輯助手
+# 小柯機器人圖像編輯助手 https://achir1015.github.io/xiaoke-photo/online/
+<img width="1908" height="1076" alt="image" src="https://github.com/user-attachments/assets/ed16c01d-c1b5-4ad1-889f-b2bbac2c210c" />
+示範 
+
+https://youtu.be/OU66gN-gkng
 
 全繁體中文的圖層式影像編輯器。圖層、遮色片、調整圖層、圖層樣式、文字、向量、筆刷與 PSD 都由修改自 PhotoCraft 的引擎提供，
 外層加上 OpenAI 繪圖、插件功能、語音動畫教學與自動更新。
