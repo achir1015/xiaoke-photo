@@ -56,10 +56,17 @@ if (A) {
 
 const ios = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xkp;
 if (ios) {
+  const call = (cmd, ...args) => ios.postMessage({ cmd, args });
   window.xkNative = {
     platform: 'ios',
-    openExternal: (url) => ios.postMessage({ type: 'open', url }),
-    saveFile: async (name, bytes) => { ios.postMessage({ type: 'save', name, parts: bytesToBase64Chunks(bytes) }); return '分享視窗'; },
+    openExternal: (url) => call('open_url', url),
+    saveFile: async (name, bytes) => {
+      const b = await call('begin_save', name);
+      if (b.status !== 'ok') throw new Error(b.message);
+      for (const c of bytesToBase64Chunks(bytes)) await call('write_chunk', b.token, c);
+      const e = await call('end_save', b.token);
+      return e.path || name;
+    },
     update: {
       check: async () => {
         const res = await fetch('https://achir1015.github.io/xiaoke-photo/ios/manifest.plist', { cache: 'no-store' });
@@ -67,7 +74,7 @@ if (ios) {
         const current = window.XIAOKE_VERSION;
         return { current, latest: m ? m[1] : current, newer: !!m && m[1] !== current, notes: '', openPage: true };
       },
-      openPage: async () => ios.postMessage({ type: 'open', url: 'https://achir1015.github.io/xiaoke-photo/ios/' }),
+      openPage: async () => call('open_url', 'https://achir1015.github.io/xiaoke-photo/ios/'),
     },
   };
 }

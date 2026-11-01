@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小柯機器人圖像編輯助手</title>
+<link rel="icon" href="ios/icon-180.png">
+<link rel="apple-touch-icon" href="ios/icon-180.png">
+<style>
+  :root { --bg: #20232b; --card: #2a2e38; --fg: #eef1f6; --dim: #a9b1c2; --accent: #8cc3ff; --btn: #2f7fd8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: radial-gradient(circle at 50% 0, #34506f, var(--bg) 70%); color: var(--fg); font: 17px/1.6 -apple-system, "Microsoft JhengHei UI", "PingFang TC", "Noto Sans TC", sans-serif; min-height: 100vh; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 16px 56px; }
+  .head { display: flex; align-items: center; gap: 18px; }
+  img.icon { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 8px 24px rgba(0,0,0,.45); flex: none; }
+  h1 { margin: 0; font-size: 28px; }
+  .sub { color: var(--dim); margin: 4px 0 0; }
+  a.play { display: block; margin-top: 26px; padding: 22px 16px; border-radius: 14px; background: var(--btn); color: #fff; font-size: 24px; font-weight: 700; text-align: center; text-decoration: none; box-shadow: 0 4px 0 #1f5ca3; }
+  a.play:active { transform: translateY(2px); box-shadow: 0 2px 0 #1f5ca3; }
+  .note { color: var(--dim); font-size: 15px; text-align: center; margin: 10px 0 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 28px; }
+  .grid a { display: block; padding: 14px 16px; background: var(--card); border-radius: 12px; color: var(--fg); text-decoration: none; border: 1px solid #474e60; }
+  .grid a:hover { border-color: var(--accent); }
+  .grid b { display: block; color: var(--accent); }
+  .grid span { color: var(--dim); font-size: 14px; }
+  .card { margin-top: 28px; padding: 18px 20px; background: var(--card); border-radius: 14px; }
+  .card h2 { margin: 0 0 8px; font-size: 18px; color: var(--accent); }
+  ul { margin: 0; padding-left: 1.3em; }
+  li { margin: 4px 0; }
+  footer { margin-top: 34px; color: var(--dim); font-size: 14px; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <img class="icon" src="ios/icon-512.png" alt="小柯機器人圖像編輯助手圖示">
+    <div><h1>小柯機器人圖像編輯助手</h1><p class="sub" id="ver">全繁體中文的圖層式影像編輯．AI 繪圖．人像修圖</p></div>
+  </div>
+
+  <a class="play" href="online/">▶ 立即線上使用</a>
+  <p class="note">不用安裝，電腦和平板的瀏覽器都能用（建議 Chrome、Edge 或 Safari）。</p>
+
+  <div class="grid">
+    <a id="dl-win" href="https://github.com/achir1015/xiaoke-photo/releases/latest"><b>Windows 11</b><span>安裝版，會建立桌面捷徑</span></a>
+    <a id="dl-mac" href="https://github.com/achir1015/xiaoke-photo/releases/latest"><b>MacBook Pro</b><span>Apple 晶片／Intel</span></a>
+    <a id="dl-apk" href="https://github.com/achir1015/xiaoke-photo/releases/latest"><b>Android 手機</b><span>APK 安裝檔</span></a>
+    <a href="ios/"><b>iPad／iPhone</b><span>用 Safari 開，按一下安裝</span></a>
+  </div>
+
+  <div class="card">
+    <h2>主要功能</h2>
+    <ul>
+      <li>圖層、遮色片、調整圖層、圖層樣式、文字、向量、筆刷，可開啟與儲存 PSD。</li>
+      <li>填入 OpenAI 金鑰後可文字生成圖像，移除人物、物件、浮水印並補完背景，結果自動加入圖層。</li>
+      <li>內建自動磨皮、髮絲摳圖、水波倒影、全景變形、底片調色、黑白暗房、智慧降噪與無損放大，不需要金鑰。</li>
+      <li>有語音與動畫教學，新版本可在程式內一鍵更新。</li>
+    </ul>
+  </div>
+  <footer>系統開發：吳玉柱 先生 與 Claude AI Opus 5.5</footer>
+</main>
+<script>
+  // 下載按鈕直接連到最新版的安裝檔（查不到就留在 Release 頁）
+  fetch('https://api.github.com/repos/achir1015/xiaoke-photo/releases/latest').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+    if (!j) return;
+    document.getElementById('ver').textContent = '最新版本 ' + j.tag_name + '．全繁體中文的圖層式影像編輯．AI 繪圖．人像修圖';
+    var find = function (re) { return (j.assets || []).filter(function (a) { return re.test(a.name); })[0]; };
+    var set = function (id, a) { if (a) document.getElementById(id).href = a.browser_download_url; };
+    set('dl-win', find(/win-x64\.exe$/));
+    set('dl-apk', find(/android\.apk$/));
+  }).catch(function () {});
+</script>
+</body>
+</html>
