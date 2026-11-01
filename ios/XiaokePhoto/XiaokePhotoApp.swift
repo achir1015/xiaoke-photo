@@ -65,6 +65,7 @@ final class Web: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate
         view.scrollView.contentInsetAdjustmentBehavior = .never
         if #available(iOS 16.4, *) { view.isInspectable = true }
         view.load(URLRequest(url: LocalServer.shared.url))
+        if ProcessInfo.processInfo.environment["XK_SELFTEST"] != nil { selfTest() }
     }
 
     // 外部連結（GitHub、OpenAI 網站）用 Safari 開
@@ -79,6 +80,45 @@ final class Web: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate
         return nil
     }
 
+
+    // 實機自我測試（devicectl 帶 XK_SELFTEST=1 啟動才跑）：結果與畫面存到 App 的 Documents
+    private func selfTest() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let script = """
+        const t = Date.now();
+        while (!(window.__xiaoke && __xiaoke.engine.api) && Date.now() - t < 60000) await new Promise((r) => setTimeout(r, 300));
+        const out = { ms: Date.now() - t, inner: [innerWidth, innerHeight], dpr: devicePixelRatio, gpu: !!navigator.gpu };
+        if (!window.__xiaoke) return JSON.stringify(out);
+        document.querySelectorAll('.modal').forEach((m) => m.remove());
+        const e = __xiaoke.engine;
+        await e.command('file.new', { width: 800, height: 600, mode: 'rgb', depth: 8, background: 'white' });
+        const c = new OffscreenCanvas(800, 600), g = c.getContext('2d');
+        g.fillStyle = '#d9a07a'; g.fillRect(0, 0, 800, 600); g.fillStyle = '#3a6ea5'; g.fillRect(300, 150, 300, 300);
+        const d = g.getImageData(0, 0, 800, 600);
+        await e.place('iOS 測試', { data: d.data, width: 800, height: 600 });
+        await new Promise((r) => setTimeout(r, 2000));
+        out.layers = (await e.documentInfo()).layers.map((l) => l.name);
+        const t2 = performance.now();
+        const r = await __xiaoke.run('portraitSmooth', await e.composite(400), { amount: 60 });
+        out.pluginMs = Math.round(performance.now() - t2); out.plugin = r.width;
+        out.sys = [...document.querySelectorAll('#system button')].map((b) => Math.round(b.getBoundingClientRect().right));
+        return JSON.stringify(out);
+        """
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            self.view.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page) { result in
+                let text: String
+                switch result {
+                case .success(let v): text = "\(v)"
+                case .failure(let e): text = "error: \(e)"
+                }
+                try? text.write(to: docs.appendingPathComponent("selftest.txt"), atomically: true, encoding: .utf8)
+                self.view.takeSnapshot(with: nil) { img, _ in
+                    if let d = img?.pngData() { try? d.write(to: docs.appendingPathComponent("selftest.png")) }
+                }
+            }
+        }
+    }
 
     // 網頁被系統回收時（記憶體不足）自動重新載入
     func webViewWebContentProcessDidTerminate(_ w: WKWebView) { w.reload() }

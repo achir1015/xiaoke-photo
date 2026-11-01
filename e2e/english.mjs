@@ -42,5 +42,6 @@ fs.writeFileSync(path.join(OUT, 'missing.json'), JSON.stringify(result, null, 1)
 console.log('開過對話框', result.log.opened, '失敗', result.log.failed.length, '未翻譯', result.missing.length);
 console.log(result.log.toolErr || '');
 await page.screenshot({ path: path.join(OUT, 'english.png') });
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.destroy())).catch(() => {}); // 測試文件沒存檔，不跳確認框
 await app.close().catch(() => {});
 process.exit(0);

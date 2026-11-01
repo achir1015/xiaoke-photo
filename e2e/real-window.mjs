@@ -26,5 +26,6 @@ const win = await app.evaluate(async ({ BrowserWindow, screen }) => {
 fs.writeFileSync(path.join(OUT, 'real-window.png'), Buffer.from(win.png, 'base64'));
 delete win.png;
 console.log(JSON.stringify({ info, win }));
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.destroy())).catch(() => {}); // 測試文件沒存檔，不跳確認框
 await app.close().catch(() => {});
 process.exit(0);

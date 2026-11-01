@@ -118,12 +118,30 @@ button.primary:hover { background: var(--accent); }
 .fade-in { animation: fade .7s; }
 @keyframes fade { from { opacity: 0; } }
 
-@media (max-width: 760px) {
-  #brand, #quick { display: none; }
-  #system { gap: 4px; }
-  #system button { padding: 3px 6px; font-size: 12px; }
+#btnDock { display: none; }
+@media (max-width: 1000px) {
+  #brand { display: none; }
+  #btnDock { display: inline-block; }
+  #topbar { gap: 6px; padding: 0 6px; }
+  #quick { margin-left: 0; gap: 3px; }
+  #quick button, #system button { padding: 3px 7px; font-size: 12px; }
+  #system { gap: 3px; }
+  #btnKey { gap: 4px; }
   #panel { position: fixed; right: 0; top: var(--bar-h); bottom: 0; width: min(330px, 92vw); z-index: 40; box-shadow: -6px 0 18px #0007; }
+}
+@media (max-width: 620px) {
+  #quick { display: none; }
+}
+@media (max-width: 760px) {
   .guide { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
   .guide ol { grid-row: auto; display: flex; overflow-x: auto; }
   .guide li { white-space: nowrap; }
+}
+@media (max-height: 520px) {
+  .dialog { padding: 10px 14px; }
+  .guide { grid-template-columns: 150px 1fr; height: 100%; }
+  .guide .say { min-height: 40px; font-size: 13px; padding: 4px 10px; }
+  .guide li { padding: 3px 8px; font-size: 13px; }
+  .masker { height: 100%; }
+  .masker h2 { display: none; }
 }

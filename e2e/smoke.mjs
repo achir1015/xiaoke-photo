@@ -127,7 +127,8 @@ try {
   await page.click('#keySave');
   await wait(300);
   check(await J(() => document.querySelector('#btnKey').classList.contains('set')), '金鑰指示燈變綠');
-  const stored = fs.readFileSync(path.join(process.env.APPDATA, 'xiaoke-photo-e2e', 'settings.json'), 'utf8');
+  const userData = await app.evaluate(({ app: a }) => a.getPath('userData'));
+  const stored = fs.readFileSync(path.join(userData, 'settings.json'), 'utf8');
   check(!stored.includes('sk-test-e2e'), '金鑰沒有明文存檔');
 
   // 文生圖 → 圖層
@@ -181,6 +182,7 @@ try {
   await shot('99-error').catch(() => {});
   console.log(errors.slice(0, 6).join('\n').slice(0, 800));
 }
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.destroy())).catch(() => {}); // 測試文件沒存檔，不跳確認框
 await app.close().catch(() => {});
 mock.close();
 console.log(`\n通過 ${pass}，失敗 ${fail}`);

@@ -136,9 +136,13 @@ function setPanel(open) {
   panelEl.hidden = !open;
   $('#btnPanel').classList.toggle('on', open);
 }
-setPanel(settings.panelOpen !== false && innerWidth > 760);
+setPanel(settings.panelOpen !== false && innerWidth > 1000);
 $('#btnPanel').onclick = () => { const open = panelEl.hidden; setPanel(open); window.xk.settings.set({ panelOpen: open }); };
 $('#btnKey').onclick = () => keyDialog();
+// 手機畫面窄：引擎的右側面板平常收起，要用圖層時再打開
+let dockOpen = innerWidth > 1000;
+const setDock = (open) => { dockOpen = open; return engine.call('ui.set', { panels: { dock: open, rail: open, status_bar: open } }).catch(() => {}); };
+$('#btnDock').onclick = () => { setPanel(false); setDock(!dockOpen); };
 $('#btnUpdate').onclick = () => checkUpdate(false);
 $('#btnAbout').onclick = about;
 $('#btnGuide').onclick = () => openGuide();
@@ -174,6 +178,8 @@ try {
   engine.focus();
   window.xk.ready && window.xk.ready();
   hookDownloads();
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xkp) window.webkit.messageHandlers.xkp.postMessage({ cmd: 'log', args: ['ready', `${innerWidth}x${innerHeight} gpu=${!!navigator.gpu}`] });
+  if (innerWidth <= 1000) setDock(false);
   window.xk.onOpenFile && window.xk.onOpenFile(({ name, bytes }) => engine.open(name, new Uint8Array(bytes)));
   if (!settings.guideSeen) {
     window.xk.settings.set({ guideSeen: true });
