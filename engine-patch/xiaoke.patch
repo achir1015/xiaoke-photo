@@ -1,0 +1,3170 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a2a355c..bfd5322 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5457,6 +5457,7 @@ dependencies = [
+  "js-sys",
+  "log",
+  "photocraft-codecs",
++ "photocraft-compose",
+  "photocraft-doc",
+  "photocraft-engine",
+  "photocraft-io",
+diff --git a/apps/photocraft-web/Cargo.toml b/apps/photocraft-web/Cargo.toml
+index 0176e0f..df14edf 100644
+--- a/apps/photocraft-web/Cargo.toml
++++ b/apps/photocraft-web/Cargo.toml
+@@ -24,6 +24,8 @@ photocraft-io = { workspace = true }
+ photocraft-codecs = { workspace = true }
+ photocraft-doc = { workspace = true }
+ photocraft-ui-egui = { workspace = true }
++photocraft-compose = { workspace = true }
++serde_json = { workspace = true }
+ egui = { workspace = true }
+ log = { workspace = true }
+ 
+diff --git a/apps/photocraft-web/index.html b/apps/photocraft-web/index.html
+index d090cf4..f8c4c1b 100644
+--- a/apps/photocraft-web/index.html
++++ b/apps/photocraft-web/index.html
+@@ -1,9 +1,9 @@
+ <!DOCTYPE html>
+-<html lang="en">
++<html lang="zh-Hant">
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+-  <title>PhotoCraft</title>
++  <title>小柯機器人圖像編輯助手</title>
+   <link data-trunk rel="rust" data-bin="photocraft-web" data-cargo-profile="wasm-release" data-cargo-features="heif" data-wasm-opt="z" data-wasm-opt-params="--converge" data-weak-refs />
+   <style>
+     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
+@@ -21,10 +21,8 @@
+ <body>
+   <canvas id="photocraft_canvas"></canvas>
+   <div id="photocraft_loading">
+-    <p>Loading PhotoCraft&hellip;</p>
+-    <p id="photocraft_stalled">This is taking longer than usual. If PhotoCraft doesn't start, its files may have failed to
+-      download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
+-      console lists what failed.</p>
++    <p>影像引擎載入中&hellip;</p>
++    <p id="photocraft_stalled">載入時間比平常久。如果一直沒有畫面，請<a href="">重新載入</a>。</p>
+   </div>
+ </body>
+ </html>
+diff --git a/apps/photocraft-web/src/main.rs b/apps/photocraft-web/src/main.rs
+index 0802a02..13f4ba1 100644
+--- a/apps/photocraft-web/src/main.rs
++++ b/apps/photocraft-web/src/main.rs
+@@ -25,6 +25,9 @@ mod indexed_presets;
+ #[cfg(target_arch = "wasm32")]
+ mod web;
+ 
++#[cfg(target_arch = "wasm32")]
++mod xiaoke;
++
+ #[cfg(target_arch = "wasm32")]
+ fn main() {
+     web::start();
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index 024888c..76a6170 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -14,7 +14,7 @@ use photocraft_ui_egui::theme::ThemeKind;
+ use photocraft_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotocraftApp, Services};
+ use wasm_bindgen::JsCast as _;
+ 
+-type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
++pub(crate) type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+ 
+ /// Everything File › Open reads: PhotoCraft, Photoshop, OpenRaster, Krita and Affinity documents, flat images, and
+ /// Photoshop brushes (.abr), gradients (.grd), layer styles (.asl) and swatches (.aco, .act, .ase), which go to the preset libraries.
+@@ -89,7 +89,10 @@ pub fn start() {
+                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
+                     preset_warnings.extend(warnings);
+                     let drag = listen_drag(&pen_target);
+-                    let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
++                    let (control_tx, control_rx) = std::sync::mpsc::channel();
++                    let bridge = crate::xiaoke::install(control_tx, inbox.clone(), place_inbox.clone(), cc.egui_ctx.clone());
++                    let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)))
++                        .with_control(control_rx);
+                     if !preset_warnings.is_empty() {
+                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
+                     }
+@@ -103,14 +106,14 @@ pub fn start() {
+                     }
+                     let unsaved = Arc::new(AtomicBool::new(false));
+                     guard_unload(unsaved.clone());
+-                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "" }))
++                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "", bridge }))
+                 }),
+             )
+             .await;
+         if let Some(el) = document.get_element_by_id("photocraft_loading") {
+             match result {
+                 Ok(()) => el.remove(),
+-                Err(e) => el.set_inner_html(&format!("<p>PhotoCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
++                Err(e) => el.set_inner_html(&format!("<p>影像引擎啟動失敗：{e:?}</p><p>需要支援 WebGPU 或 WebGL2 的環境。</p>")),
+             }
+         }
+     });
+@@ -268,6 +271,7 @@ struct WebShell {
+     inbox: Inbox,
+     /// Dropped files to place on the active document's canvas.
+     place_inbox: Inbox,
++    bridge: crate::xiaoke::Bridge,
+     /// Read by the `beforeunload` listener ([`guard_unload`]).
+     unsaved: Arc<AtomicBool>,
+     served: Served,
+@@ -373,6 +377,7 @@ impl eframe::App for WebShell {
+         }
+         self.serve_fonts(ctx);
+         self.app.logic_frame(ctx, frame);
++        self.bridge.pump(&self.app, ctx);
+         self.save_presets(ctx);
+         self.app.finish_type_reset_logic(ctx);
+     }
+diff --git a/apps/photocraft-web/src/xiaoke.rs b/apps/photocraft-web/src/xiaoke.rs
+new file mode 100644
+index 0000000..535d620
+--- /dev/null
++++ b/apps/photocraft-web/src/xiaoke.rs
+@@ -0,0 +1,182 @@
++//! 小柯機器人圖像編輯助手：把引擎接給外層網頁（window.xiaokeEngine）。
++//!
++//! 網頁版沒有 TCP 控制通道，這裡改用同一套 `ControlRequest`，由 JS 排進佇列、每個畫格處理。
++//! - `call(method, paramsJson)`：任何控制方法，回傳 JSON 字串的 Promise
++//! - `render(maxSide)`：目前文件的合成圖 PNG（Uint8Array），沒有文件時為 null
++//! - `selection()`：選取範圍的灰階 PNG（白＝選取），沒有選取時為 null
++//! - `place(name, bytes)`：置入成新圖層；`open(name, bytes)`：開成新文件
++
++use std::cell::RefCell;
++use std::collections::VecDeque;
++use std::rc::Rc;
++use std::sync::PoisonError;
++use std::sync::mpsc::{Receiver, Sender};
++
++use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
++use photocraft_ui_egui::{ControlRequest, PhotocraftApp};
++use serde_json::{Value, json};
++use wasm_bindgen::JsValue;
++use wasm_bindgen::closure::Closure;
++
++use crate::web::Inbox;
++
++enum Job {
++    Render(u32, js_sys::Function),
++    Selection(js_sys::Function),
++}
++
++#[derive(Default)]
++struct Queue {
++    jobs: VecDeque<Job>,
++    replies: Vec<(Receiver<Value>, js_sys::Function)>,
++}
++
++#[derive(Clone)]
++pub struct Bridge {
++    queue: Rc<RefCell<Queue>>,
++}
++
++fn bytes_value(bytes: Option<Vec<u8>>) -> JsValue {
++    match bytes {
++        Some(b) => js_sys::Uint8Array::from(b.as_slice()).into(),
++        None => JsValue::NULL,
++    }
++}
++
++fn png(width: u32, height: u32, layout: ChannelLayout, pixels: Vec<u8>) -> Option<Vec<u8>> {
++    let image = Image::from_u8(width, height, layout, pixels).ok()?;
++    photocraft_codecs::encode(&image, Format::Png, &EncodeOptions::default()).ok()
++}
++
++fn set(target: &JsValue, name: &str, value: &JsValue) {
++    let _ = js_sys::Reflect::set(target, &JsValue::from_str(name), value);
++}
++
++fn deferred(run: impl FnOnce(js_sys::Function) + 'static) -> js_sys::Promise {
++    let mut run = Some(run);
++    js_sys::Promise::new(&mut |resolve, _reject| {
++        if let Some(run) = run.take() {
++            run(resolve);
++        }
++    })
++}
++
++/// 掛上 `window.xiaokeEngine`，回傳每個畫格要處理的 `Bridge`。
++pub fn install(tx: Sender<ControlRequest>, inbox: Inbox, place_inbox: Inbox, ctx: egui::Context) -> Bridge {
++    let queue: Rc<RefCell<Queue>> = Rc::default();
++    let api = js_sys::Object::new();
++
++    let call = {
++        let (queue, ctx) = (queue.clone(), ctx.clone());
++        Closure::<dyn FnMut(String, Option<String>) -> js_sys::Promise>::new(move |method: String, params: Option<String>| {
++            let (queue, ctx, tx) = (queue.clone(), ctx.clone(), tx.clone());
++            deferred(move |resolve| {
++                let params = params.and_then(|p| serde_json::from_str(&p).ok()).unwrap_or(Value::Null);
++                let (req, rx) = ControlRequest::new(method, params);
++                if tx.send(req).is_err() {
++                    let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(r#"{"ok":false,"error":"engine stopped"}"#));
++                    return;
++                }
++                queue.borrow_mut().replies.push((rx, resolve));
++                ctx.request_repaint();
++            })
++        })
++    };
++    set(&api, "call", call.as_ref());
++    call.forget();
++
++    let render = {
++        let (queue, ctx) = (queue.clone(), ctx.clone());
++        Closure::<dyn FnMut(Option<u32>) -> js_sys::Promise>::new(move |max_side: Option<u32>| {
++            let (queue, ctx) = (queue.clone(), ctx.clone());
++            deferred(move |resolve| {
++                queue.borrow_mut().jobs.push_back(Job::Render(max_side.unwrap_or(0), resolve));
++                ctx.request_repaint();
++            })
++        })
++    };
++    set(&api, "render", render.as_ref());
++    render.forget();
++
++    let selection = {
++        let (queue, ctx) = (queue.clone(), ctx.clone());
++        Closure::<dyn FnMut() -> js_sys::Promise>::new(move || {
++            let (queue, ctx) = (queue.clone(), ctx.clone());
++            deferred(move |resolve| {
++                queue.borrow_mut().jobs.push_back(Job::Selection(resolve));
++                ctx.request_repaint();
++            })
++        })
++    };
++    set(&api, "selection", selection.as_ref());
++    selection.forget();
++
++    for (name, target, quiet) in [("place", place_inbox, true), ("open", inbox, false)] {
++        let ctx = ctx.clone();
++        let push = Closure::<dyn FnMut(String, js_sys::Uint8Array)>::new(move |file: String, bytes: js_sys::Uint8Array| {
++            let file = if quiet { format!("xk:{file}") } else { file };
++            target.lock().unwrap_or_else(PoisonError::into_inner).push((file, bytes.to_vec()));
++            ctx.request_repaint();
++        });
++        set(&api, name, push.as_ref());
++        push.forget();
++    }
++
++    // 測試用：開始收集未翻譯字串，再次呼叫回傳清單
++    let missing = Closure::<dyn FnMut() -> js_sys::Array>::new(|| {
++        photocraft_ui_egui::i18n::TRACK_MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
++        photocraft_ui_egui::i18n::missing_strings().into_iter().map(|s| JsValue::from_str(&s)).collect()
++    });
++    set(&api, "missing", missing.as_ref());
++    missing.forget();
++
++    if let Some(window) = web_sys::window() {
++        set(&window, "xiaokeEngine", &api);
++    }
++    Bridge { queue }
++}
++
++impl Bridge {
++    /// 每個畫格：完成排隊的取圖工作，把已有結果的控制回覆交還 JS。
++    pub fn pump(&self, app: &PhotocraftApp, ctx: &egui::Context) {
++        let mut q = self.queue.borrow_mut();
++        while let Some(job) = q.jobs.pop_front() {
++            let doc = app.session.active().map(|d| &d.doc);
++            let (resolve, out) = match job {
++                Job::Render(max_side, resolve) => {
++                    let bytes = doc.and_then(|d| {
++                        let side = if max_side == 0 { d.size.width.max(d.size.height) } else { max_side };
++                        let img = photocraft_compose::thumbnail(d, side.max(1));
++                        png(img.width, img.height, ChannelLayout::Rgba, img.pixels)
++                    });
++                    (resolve, bytes)
++                }
++                Job::Selection(resolve) => {
++                    let bytes = doc.and_then(|d| {
++                        let sel = d.selection.as_ref()?;
++                        let rect = d.bounds();
++                        let channels = sel.channels().max(1);
++                        let gray: Vec<u8> = sel.read_region(rect).chunks_exact(channels).map(|p| (p[0].clamp(0.0, 1.0) * 255.0).round() as u8).collect();
++                        png(rect.width(), rect.height(), ChannelLayout::Gray, gray)
++                    });
++                    (resolve, bytes)
++                }
++            };
++            let _ = resolve.call1(&JsValue::NULL, &bytes_value(out));
++        }
++        q.replies.retain(|(rx, resolve)| match rx.try_recv() {
++            Ok(v) => {
++                let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(&v.to_string()));
++                false
++            }
++            Err(std::sync::mpsc::TryRecvError::Empty) => true,
++            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
++                let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(&json!({"ok": false, "error": "no reply"}).to_string()));
++                false
++            }
++        });
++        if !q.replies.is_empty() {
++            ctx.request_repaint();
++        }
++    }
++}
+diff --git a/assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png b/assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png
+index 9f65c1fec187ca68da6c9c63ec71c49e23fb494e..df7eaeb8e7baf5077a41ea188767d809e05d067f 100644
+GIT binary patch
+literal 13913
+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
+
+literal 18177
+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
+
+diff --git a/crates/doc/src/lib.rs b/crates/doc/src/lib.rs
+index 16bf865..71266f1 100644
+--- a/crates/doc/src/lib.rs
++++ b/crates/doc/src/lib.rs
+@@ -1001,7 +1001,7 @@ impl Document {
+     /// New document with a filled "Background" layer (like File → New).
+     pub fn with_background(name: impl Into<String>, size: Size, mode: ColorMode, depth: SampleType, fill: Color) -> Self {
+         let mut d = Self::new(name, size, mode, depth);
+-        let mut bg = Layer::raster("Background", d.pixel_format());
++        let mut bg = Layer::raster("背景", d.pixel_format());
+         bg.locks.transparency = true;
+         bg.locks.position = true;
+         if let Some(s) = bg.surface_mut() {
+@@ -1229,24 +1229,24 @@ impl Document {
+     pub fn next_layer_name(&self, base: &str) -> String {
+         let names: std::collections::HashSet<&str> = self.walk().into_iter().map(|(_, _, l)| l.name.as_str()).collect();
+         // At most `names.len() + 1` candidates are needed, so the search always succeeds.
+-        (1..=names.len() + 1).map(|n| format!("{base} {n}")).find(|n| !names.contains(n.as_str())).unwrap_or_else(|| base.to_string())
++        (1..=names.len() + 1).map(|n| format!("{} {n}", zh_layer_base(base))).find(|n| !names.contains(n.as_str())).unwrap_or_else(|| base.to_string())
+     }
+ 
+     /// Name for a copy of a layer named `name`, unique in the document: "Layer 1 copy", then
+     /// "Layer 1 copy 2", "Layer 1 copy 3"… A name that already ends in "copy" (or "copy N") is
+     /// numbered from its root rather than growing another "copy".
+     pub fn copy_name(&self, name: &str) -> String {
+-        let root = match name.rsplit_once(" copy") {
++        let root = match name.rsplit_once(" 拷貝") {
+             Some((root, rest)) if rest.is_empty() || rest.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) => root,
+             _ => name,
+         };
+         let names: std::collections::HashSet<&str> = self.walk().into_iter().map(|(_, _, l)| l.name.as_str()).collect();
+-        let first = format!("{root} copy");
++        let first = format!("{root} 拷貝");
+         if !names.contains(first.as_str()) {
+             return first;
+         }
+         // At most `names.len() + 1` candidates are needed, so the search always succeeds.
+-        (2..=names.len() + 2).map(|n| format!("{root} copy {n}")).find(|n| !names.contains(n.as_str())).unwrap_or(first)
++        (2..=names.len() + 2).map(|n| format!("{root} 拷貝 {n}")).find(|n| !names.contains(n.as_str())).unwrap_or(first)
+     }
+ 
+     /// Top-most layer id, useful as the default active layer.
+@@ -1533,3 +1533,18 @@ mod id_tests {
+         assert!(super::DocId::fresh().0 > far);
+     }
+ }
++
++/// 預設圖層名稱的繁體中文（圖層面板、PSD 都會看到這個名字）。
++fn zh_layer_base(base: &str) -> &str {
++    match base {
++        "Layer" => "圖層", "Group" => "群組", "Frame" => "畫框", "Blended" => "混合", "Depth" => "深度",
++        "Color Fill" => "純色", "Gradient Fill" => "漸層", "Pattern Fill" => "圖樣", "Content-Aware Fill" => "內容感知填滿",
++        "Vanishing Point" => "消失點", "Video Layer" => "視訊圖層", "Rectangle" => "矩形", "Rounded Rectangle" => "圓角矩形",
++        "Ellipse" => "橢圓", "Polygon" => "多邊形", "Star" => "星形", "Line" => "直線", "Shape" => "形狀",
++        "Curves" => "曲線", "Levels" => "色階", "Brightness/Contrast" => "亮度/對比", "Hue/Saturation" => "色相/飽和度",
++        "Vibrance" => "自然飽和度", "Color Balance" => "色彩平衡", "Black & White" => "黑白", "Photo Filter" => "相片濾鏡",
++        "Channel Mixer" => "色版混合器", "Color Lookup" => "顏色查詢", "Invert" => "負片效果", "Posterize" => "色調分離",
++        "Threshold" => "臨界值", "Gradient Map" => "漸層對應", "Selective Color" => "選取顏色", "Exposure" => "曝光度",
++        other => other,
++    }
++}
+diff --git a/crates/engine/src/cmd.rs b/crates/engine/src/cmd.rs
+index 27c7ca3..dedf883 100644
+--- a/crates/engine/src/cmd.rs
++++ b/crates/engine/src/cmd.rs
+@@ -263,7 +263,7 @@ fn build() -> Vec<CommandSpec> {
+                 let (w, h) = (px("width", 1920), px("height", 1080));
+                 let mode = color_mode(p.get("mode").and_then(Value::as_str).unwrap_or("rgb")).unwrap_or(ColorMode::Rgb);
+                 let depth = sample_type(p.get("depth").and_then(Value::as_u64).unwrap_or(8)).unwrap_or(SampleType::U8);
+-                let name = p.get("name").and_then(Value::as_str).unwrap_or("Untitled").to_string();
++                let name = p.get("name").and_then(Value::as_str).unwrap_or("未命名").to_string();
+                 let res = p.get("resolution").and_then(Value::as_f64).unwrap_or(72.0).clamp(1.0, MAX_RESOLUTION) as f32;
+                 // The background colour; `None` for Transparent.
+                 let background = match p.get("background").and_then(Value::as_str).unwrap_or("white") {
+@@ -284,7 +284,7 @@ fn build() -> Vec<CommandSpec> {
+                     Document::with_background(name, Size::new(w, h), mode, depth, c)
+                 } else {
+                     let mut d = Document::new(name, Size::new(w, h), mode, depth);
+-                    d.layers.push(Layer::raster("Layer 1", d.pixel_format()));
++                    d.layers.push(Layer::raster("圖層 1", d.pixel_format()));
+                     d
+                 };
+                 doc.resolution_dpi = res;
+@@ -777,7 +777,7 @@ fn build() -> Vec<CommandSpec> {
+         cmd!("layer.flattenImage", "Flatten Image", ["Layer"], None, "{}", has_doc, |s, _| {
+             s.edit("Flatten Image", |doc, active| {
+                 let fmt = doc.pixel_format();
+-                let mut bg = Layer::raster("Background", fmt);
++                let mut bg = Layer::raster("背景", fmt);
+                 bg.locks.transparency = true;
+                 bg.locks.position = true;
+                 *crate::pixels_mut(&mut bg)? = photocraft_compose::flatten_to_surface(doc, fmt, Some([1.0, 1.0, 1.0]));
+diff --git a/crates/engine/src/cmd/adjust_cmds.rs b/crates/engine/src/cmd/adjust_cmds.rs
+index 5bbd7df..782d478 100644
+--- a/crates/engine/src/cmd/adjust_cmds.rs
++++ b/crates/engine/src/cmd/adjust_cmds.rs
+@@ -525,7 +525,7 @@ fn hdr_toning(s: &mut Session, p: &Value) -> Result<Value> {
+         tone::hdr_toning(&mut px, w, hgt, &h);
+         let fmt = doc.pixel_format();
+         let data: Vec<f32> = px.iter().flat_map(|q| photocraft_raster::from_rgba(&fmt, *q)).collect();
+-        let mut bg = Layer::raster("Background", fmt);
++        let mut bg = Layer::raster("背景", fmt);
+         bg.locks.transparency = true;
+         bg.locks.position = true;
+         crate::pixels_mut(&mut bg)?.write_region(doc.bounds(), &data);
+diff --git a/crates/engine/src/cmd/artboard_cmds.rs b/crates/engine/src/cmd/artboard_cmds.rs
+index 2f05ddf..5a37054 100644
+--- a/crates/engine/src/cmd/artboard_cmds.rs
++++ b/crates/engine/src/cmd/artboard_cmds.rs
+@@ -673,7 +673,7 @@ fn artboards_to_pdf(s: &mut Session, p: &Value) -> Result<Value> {
+         let mut surf = Surface::new(fmt);
+         let vals: Vec<f32> = buf.px.iter().flat_map(|px| photocraft_raster::from_rgba(&fmt, *px)).collect();
+         surf.write_region(one.bounds(), &vals);
+-        flat.layers.push(Layer::new("Background", LayerContent::Raster(surf)));
++        flat.layers.push(Layer::new("背景", LayerContent::Raster(surf)));
+         let (jpeg, _) = encode(&flat, "page.jpg", quality)?;
+         pages.push((one.size.width, one.size.height, doc.resolution_dpi, jpeg));
+     }
+diff --git a/crates/engine/src/cmd/background_cmds.rs b/crates/engine/src/cmd/background_cmds.rs
+index 0c067b3..0b4948a 100644
+--- a/crates/engine/src/cmd/background_cmds.rs
++++ b/crates/engine/src/cmd/background_cmds.rs
+@@ -72,7 +72,7 @@ fn background_from_layer(s: &mut Session, p: &Value) -> Result<Value> {
+         let rest = std::mem::replace(&mut doc.layers, vec![only]);
+         let pixels = photocraft_compose::flatten_to_surface(doc, fmt, Some([bg[0], bg[1], bg[2]]));
+         doc.layers = rest;
+-        let mut out = Layer::raster("Background", fmt);
++        let mut out = Layer::raster("背景", fmt);
+         out.id = id;
+         out.visible = visible;
+         out.locks.transparency = true;
+diff --git a/crates/engine/src/cmd/channel_cmds/calc.rs b/crates/engine/src/cmd/channel_cmds/calc.rs
+index 9c1d0ea..6964484 100644
+--- a/crates/engine/src/cmd/channel_cmds/calc.rs
++++ b/crates/engine/src/cmd/channel_cmds/calc.rs
+@@ -123,7 +123,7 @@ pub(super) fn calculations(s: &mut Session, p: &Value) -> Result<Value> {
+         }
+         "newDocument" => {
+             let like = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+-            let d = gray_document(name.as_deref().unwrap_or("Untitled"), &like, &out);
++            let d = gray_document(name.as_deref().unwrap_or("未命名"), &like, &out);
+             let i = s.add_document(d, None);
+             Ok(json!({ "document": i }))
+         }
+diff --git a/crates/engine/src/cmd/channel_cmds/manage.rs b/crates/engine/src/cmd/channel_cmds/manage.rs
+index 9c81381..e4fc15c 100644
+--- a/crates/engine/src/cmd/channel_cmds/manage.rs
++++ b/crates/engine/src/cmd/channel_cmds/manage.rs
+@@ -141,7 +141,7 @@ pub(super) fn gray_document(name: &str, like: &Document, plane: &[f32]) -> Docum
+     let mut d = Document::new(name, like.size, ColorMode::Grayscale, like.depth);
+     d.resolution_dpi = like.resolution_dpi;
+     let fmt = d.pixel_format();
+-    let mut bg = Layer::raster("Background", fmt);
++    let mut bg = Layer::raster("背景", fmt);
+     bg.locks.transparency = true;
+     bg.locks.position = true;
+     if let Some(s) = bg.surface_mut() {
+diff --git a/crates/engine/src/cmd/channel_cmds/spot.rs b/crates/engine/src/cmd/channel_cmds/spot.rs
+index 773089f..6966596 100644
+--- a/crates/engine/src/cmd/channel_cmds/spot.rs
++++ b/crates/engine/src/cmd/channel_cmds/spot.rs
+@@ -35,7 +35,7 @@ pub(super) fn merge_spot(s: &mut Session, p: &Value) -> Result<Value> {
+                 from_rgba(&fmt, [rgb[0], rgb[1], rgb[2], 1.0])
+             })
+             .collect();
+-        let mut bg = Layer::raster("Background", fmt);
++        let mut bg = Layer::raster("背景", fmt);
+         bg.locks.transparency = true;
+         bg.locks.position = true;
+         if let Some(sf) = bg.surface_mut() {
+@@ -125,7 +125,7 @@ pub(super) fn merge(s: &mut Session, p: &Value) -> Result<Value> {
+         }
+         planes.push(gray_plane(d, None, None, ChanRef::Composite)?);
+     }
+-    let mut out = Document::new(p.get("name").and_then(Value::as_str).unwrap_or("Untitled"), first.size, mode, first.depth);
++    let mut out = Document::new(p.get("name").and_then(Value::as_str).unwrap_or("未命名"), first.size, mode, first.depth);
+     out.resolution_dpi = first.resolution_dpi;
+     let fmt = out.pixel_format();
+     let cc = mode.color_channels();
+@@ -137,7 +137,7 @@ pub(super) fn merge(s: &mut Session, p: &Value) -> Result<Value> {
+         }
+         data.push(1.0);
+     }
+-    let mut bg = Layer::raster("Background", fmt);
++    let mut bg = Layer::raster("背景", fmt);
+     bg.locks.transparency = true;
+     bg.locks.position = true;
+     if let Some(sf) = bg.surface_mut() {
+diff --git a/crates/engine/src/cmd/edit_cmds.rs b/crates/engine/src/cmd/edit_cmds.rs
+index 8929301..b8209f5 100644
+--- a/crates/engine/src/cmd/edit_cmds.rs
++++ b/crates/engine/src/cmd/edit_cmds.rs
+@@ -128,7 +128,7 @@ fn whole_layers(d: &crate::DocState, ids: &[LayerId]) -> Option<Box<Document>> {
+     for id in ids {
+         let mut l = d.doc.layer(*id)?.clone();
+         if d.doc.is_background(*id) {
+-            l.name = "Layer 0".into();
++            l.name = "圖層 0".into();
+             l.locks = Default::default();
+         }
+         copies.layers.push(l);
+@@ -542,7 +542,7 @@ fn new_from_clipboard(s: &mut Session) -> Result<Value> {
+     let fmt = clip.surface.format();
+     let target = PixelFormat::new(fmt.mode, fmt.sample, true);
+     let moved = if dx == 0 && dy == 0 { clip.surface } else { photocraft_algo::resample::translate_surface(&clip.surface, dx, dy) };
+-    let mut doc = Document::new("Untitled", photocraft_geom::Size::new(w, h), fmt.mode, fmt.sample);
++    let mut doc = Document::new("未命名", photocraft_geom::Size::new(w, h), fmt.mode, fmt.sample);
+     if let Some(r) = clip.resolution.filter(|r| r.is_finite() && *r > 0.0) {
+         doc.resolution_dpi = r;
+     }
+diff --git a/crates/engine/src/cmd/extra_cmds.rs b/crates/engine/src/cmd/extra_cmds.rs
+index cdefb64..43304d9 100644
+--- a/crates/engine/src/cmd/extra_cmds.rs
++++ b/crates/engine/src/cmd/extra_cmds.rs
+@@ -456,7 +456,7 @@ fn layer_from_background(s: &mut Session, p: &Value) -> Result<Value> {
+ }
+ 
+ pub(crate) fn unlock_background(l: &mut Layer) {
+-    l.name = "Layer 0".into();
++    l.name = "圖層 0".into();
+     l.locks.transparency = false;
+     l.locks.position = false;
+ }
+diff --git a/crates/engine/src/cmd/file_cmds/paths.rs b/crates/engine/src/cmd/file_cmds/paths.rs
+index 840609d..4459004 100644
+--- a/crates/engine/src/cmd/file_cmds/paths.rs
++++ b/crates/engine/src/cmd/file_cmds/paths.rs
+@@ -141,7 +141,7 @@ pub fn untitled_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+ /// The name a document opened from `path` gets when `path` is a template: the first "Untitled-N"
+ /// no open document has.
+ pub fn template_name(s: &Session, path: &str) -> Option<String> {
+-    is_template(path).then(|| untitled_name("Untitled", |n| s.documents().iter().any(|d| d.doc.name == n)))
++    is_template(path).then(|| untitled_name("未命名", |n| s.documents().iter().any(|d| d.doc.name == n)))
+ }
+ 
+ pub(crate) fn stem(path: &str) -> String {
+diff --git a/crates/engine/src/cmd/file_cmds/save.rs b/crates/engine/src/cmd/file_cmds/save.rs
+index fff62dc..94e420f 100644
+--- a/crates/engine/src/cmd/file_cmds/save.rs
++++ b/crates/engine/src/cmd/file_cmds/save.rs
+@@ -228,7 +228,7 @@ pub(super) fn save_a_copy(s: &mut Session, p: &Value) -> Result<Value> {
+         // "Layers" unchecked in Save a Copy: write the flattened image.
+         let fmt = doc.pixel_format();
+         let px = flattened_checked(&doc, fmt, "file.saveACopy")?;
+-        doc.layers = vec![Layer::new("Background", LayerContent::Raster(px))];
++        doc.layers = vec![Layer::new("背景", LayerContent::Raster(px))];
+     }
+     let warnings = save_doc(&doc, &path, SaveOpts::from_params(s, p, "file.saveACopy")?)?;
+     Ok(json!({"path": path, "warnings": warnings}))
+diff --git a/crates/engine/src/cmd/image_cmds.rs b/crates/engine/src/cmd/image_cmds.rs
+index c8c3e0b..4b48d7f 100644
+--- a/crates/engine/src/cmd/image_cmds.rs
++++ b/crates/engine/src/cmd/image_cmds.rs
+@@ -951,7 +951,7 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
+         // As Photoshop: a source with a Background gives one (opaque, locked); otherwise a plain
+         // "Layer 1" that keeps the composite's transparency.
+         let has_background = doc.background().is_some();
+-        let mut merged = Layer::new(if has_background { "Background" } else { "Layer 1" }, LayerContent::Raster(surf));
++        let mut merged = Layer::new(if has_background { "背景" } else { "圖層 1" }, LayerContent::Raster(surf));
+         merged.locks.transparency = has_background;
+         merged.locks.position = has_background;
+         doc.layers = vec![merged];
+diff --git a/crates/engine/src/cmd/lens_cmds.rs b/crates/engine/src/cmd/lens_cmds.rs
+index 66a5ccf..41b93a2 100644
+--- a/crates/engine/src/cmd/lens_cmds.rs
++++ b/crates/engine/src/cmd/lens_cmds.rs
+@@ -309,7 +309,7 @@ fn run_filter(s: &mut Session, cmd: &str, label: &str, stored: Value, float_bg:
+         if float_bg && background {
+             l.locks.position = false;
+             l.locks.transparency = false;
+-            l.name = "Layer 0".into();
++            l.name = "圖層 0".into();
+         }
+         let LayerContent::Raster(surf) = &mut l.content else {
+             return Err(EngineError::Other(format!("{label} needs a pixel layer")));
+diff --git a/crates/engine/src/cmd/multichannel_cmds.rs b/crates/engine/src/cmd/multichannel_cmds.rs
+index b0d46c2..16a64b6 100644
+--- a/crates/engine/src/cmd/multichannel_cmds.rs
++++ b/crates/engine/src/cmd/multichannel_cmds.rs
+@@ -221,7 +221,7 @@ pub(crate) fn convert_from(s: &mut Session, mode: ColorMode, _p: &Value) -> Resu
+         let mut surf = Surface::new(fmt);
+         surf.write_region(canvas, &data);
+         surf.prune();
+-        let mut bg = Layer::new("Background", LayerContent::Raster(surf));
++        let mut bg = Layer::new("背景", LayerContent::Raster(surf));
+         bg.locks.transparency = true;
+         bg.locks.position = true;
+         *active = Some(bg.id);
+diff --git a/crates/engine/src/cmd/photo_cmds.rs b/crates/engine/src/cmd/photo_cmds.rs
+index 2aa2a38..a46a0e8 100644
+--- a/crates/engine/src/cmd/photo_cmds.rs
++++ b/crates/engine/src/cmd/photo_cmds.rs
+@@ -499,7 +499,7 @@ fn photomerge(s: &mut Session, p: &Value) -> Result<Value> {
+         return Err(bad(cmd, "Photomerge needs two or more images"));
+     }
+     let focal_param = p.get("focalLength").and_then(Value::as_f64).filter(|f| *f > 0.0);
+-    let doc_name = format!("Untitled_Panorama{}", s.documents().len() + 1);
++    let doc_name = format!("未命名_全景{}", s.documents().len() + 1);
+     // A background job when started with `Session::start` (#210): alignment, warping and
+     // blending run on a worker, checking for cancellation between stages and images.
+     crate::jobs::run(
+@@ -797,7 +797,7 @@ fn merge_to_hdr(s: &mut Session, p: &Value) -> Result<Value> {
+     for q in px.iter_mut() {
+         q[3] = 1.0;
+     }
+-    let mut doc = Document::new(format!("Untitled_HDR{}", s.documents().len() + 1), Size::new(w as u32, h as u32), ColorMode::Rgb, depth);
++    let mut doc = Document::new(format!("未命名_HDR{}", s.documents().len() + 1), Size::new(w as u32, h as u32), ColorMode::Rgb, depth);
+     doc.icc_profile = if depth == SampleType::F32 { Some(photocraft_cms::builtin::Builtin::LinearSrgb.profile().to_bytes()) } else { icc };
+     let fmt = doc.pixel_format();
+     let n = fmt.channels();
+@@ -808,7 +808,7 @@ fn merge_to_hdr(s: &mut Session, p: &Value) -> Result<Value> {
+     let mut surf = Surface::new(fmt);
+     surf.write_region(area, &data);
+     // The merged result is opaque: a real Background, as Crop and Straighten makes.
+-    let mut bg = Layer::new("Background", LayerContent::Raster(surf));
++    let mut bg = Layer::new("背景", LayerContent::Raster(surf));
+     bg.locks.transparency = true;
+     bg.locks.position = true;
+     doc.layers.push(bg);
+@@ -930,7 +930,7 @@ fn crop_and_straighten(s: &mut Session, _p: &Value) -> Result<Value> {
+         nd.icc_profile = doc.icc_profile.clone();
+         nd.resolution_dpi = doc.resolution_dpi;
+         nd.duotone = doc.duotone.clone();
+-        let mut bg = Layer::new("Background", LayerContent::Raster(px));
++        let mut bg = Layer::new("背景", LayerContent::Raster(px));
+         bg.locks.transparency = true;
+         bg.locks.position = true;
+         nd.layers.push(bg);
+diff --git a/crates/engine/src/cmd/sample_cmds.rs b/crates/engine/src/cmd/sample_cmds.rs
+index 9c941a1..3e756a6 100644
+--- a/crates/engine/src/cmd/sample_cmds.rs
++++ b/crates/engine/src/cmd/sample_cmds.rs
+@@ -248,7 +248,7 @@ mod tests {
+     /// the document's channels).
+     fn doc(w: u32, h: u32, mode: ColorMode, depth: SampleType, px: impl Fn(i32, i32) -> [f32; 4]) -> Document {
+         let mut d = Document::new("t", Size::new(w, h), mode, depth);
+-        let mut bg = Layer::raster("Background", d.pixel_format());
++        let mut bg = Layer::raster("背景", d.pixel_format());
+         let s = bg.surface_mut().unwrap();
+         let fmt = s.format();
+         for y in 0..h as i32 {
+diff --git a/crates/engine/src/cmd/smart_cmds/placing.rs b/crates/engine/src/cmd/smart_cmds/placing.rs
+index e0472e8..71db28f 100644
+--- a/crates/engine/src/cmd/smart_cmds/placing.rs
++++ b/crates/engine/src/cmd/smart_cmds/placing.rs
+@@ -131,11 +131,11 @@ pub fn layer_to_smart(doc: &Document, l: &Layer) -> Result<Layer> {
+         inner.blend = BlendMode::Normal;
+     }
+     if background {
+-        inner.name = "Layer 0".into();
++        inner.name = "圖層 0".into();
+     }
+     let mut out = layers_to_smart(doc, &l.name, vec![inner])?;
+     if background {
+-        out.name = "Layer 0".into();
++        out.name = "圖層 0".into();
+     }
+     out.visible = l.visible;
+     out.opacity = l.opacity;
+diff --git a/crates/engine/src/cmd/smart_cmds/unpack.rs b/crates/engine/src/cmd/smart_cmds/unpack.rs
+index af7510d..a0def07 100644
+--- a/crates/engine/src/cmd/smart_cmds/unpack.rs
++++ b/crates/engine/src/cmd/smart_cmds/unpack.rs
+@@ -36,7 +36,7 @@ fn contents(s: &Session, doc: &Document, sm: &SmartObject, intent: Intent, bpc:
+     let mut layers = std::mem::take(&mut src.layers);
+     for l in &mut layers {
+         if Some(l.id) == background_id {
+-            l.name = "Layer 0".into();
++            l.name = "圖層 0".into();
+             l.locks = Default::default();
+         }
+         embed_nested(&src.metadata, l);
+diff --git a/crates/engine/src/cmd/smartselect_cmds.rs b/crates/engine/src/cmd/smartselect_cmds.rs
+index c04df74..28cbc72 100644
+--- a/crates/engine/src/cmd/smartselect_cmds.rs
++++ b/crates/engine/src/cmd/smartselect_cmds.rs
+@@ -487,7 +487,7 @@ fn refine_edge(s: &mut Session, p: &Value) -> Result<Value> {
+             };
+             if output.starts_with("newDocument") {
+                 // Same canvas, colour mode, depth and profile, so the pixels need no conversion.
+-                let mut doc = Document::new("Untitled", d.doc.size, d.doc.mode, d.doc.depth);
++                let mut doc = Document::new("未命名", d.doc.size, d.doc.mode, d.doc.depth);
+                 doc.resolution_dpi = d.doc.resolution_dpi;
+                 doc.icc_profile = d.doc.icc_profile.clone();
+                 doc.color_table = d.doc.color_table.clone();
+diff --git a/crates/engine/src/shell_commands.rs b/crates/engine/src/shell_commands.rs
+index 3b52c03..3a74c69 100644
+--- a/crates/engine/src/shell_commands.rs
++++ b/crates/engine/src/shell_commands.rs
+@@ -90,9 +90,6 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+     ("window.theme.softLight", "Soft", &["Window", "Theme", "Light Theme"], None),
+     ("window.theme.system", "Sync with system", &["Window", "Theme"], None),
+     ("edit.search", "Search…", &["Edit"], Some("Cmd+F")),
+-    ("help.discord", "Join the ArtCraft Discord…", &["Help"], None),
+-    ("help.website", "PhotoCraft Website", &["Help"], None),
+-    ("help.artcraftWebsite", "ArtCraft Website", &["Help"], None),
+     ("help.github", "PhotoCraft on GitHub", &["Help"], None),
+     ("help.reportIssue", "Report an Issue…", &["Help"], None),
+     ("help.systemInfo", "System Info…", &["Help"], None),
+diff --git a/crates/ui-egui/src/file_open.rs b/crates/ui-egui/src/file_open.rs
+index 65c1fb5..e3ab30c 100644
+--- a/crates/ui-egui/src/file_open.rs
++++ b/crates/ui-egui/src/file_open.rs
+@@ -315,6 +315,13 @@ impl PhotocraftApp {
+                     (name, placed)
+                 }
+                 DropPlace::Bytes(name, bytes) => {
++                    // 小柯：AI 與插件的結果直接成為圖層，不進任意變形
++                    if let Some(plain) = name.strip_prefix("xk:") {
++                        if let Err(e) = self.place_bytes(plain, bytes, None) {
++                            self.failed(crate::i18n::fmt(tl!("Couldn't place {name}: {error}"), &[("name", plain), ("error", &e)]));
++                        }
++                        continue;
++                    }
+                     let placed = self.place_bytes(&name, bytes, None);
+                     (name, placed)
+                 }
+diff --git a/crates/ui-egui/src/i18n.rs b/crates/ui-egui/src/i18n.rs
+index c9e1884..4ce7726 100644
+--- a/crates/ui-egui/src/i18n.rs
++++ b/crates/ui-egui/src/i18n.rs
+@@ -460,7 +460,28 @@ pub fn t(s: &str) -> &str {
+ 
+ /// Translate an English UI string; unknown strings come back unchanged.
+ pub fn tr(lang: Lang, s: &str) -> &str {
+-    lang.catalog().plain(s).unwrap_or(s)
++    match lang.catalog().plain(s) {
++        Some(t) => t,
++        None => {
++            note_missing(s);
++            s
++        }
++    }
++}
++
++/// 小柯：測試時收集沒有翻譯的字串（平常關閉，不花時間）
++pub static TRACK_MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static MISSING: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
++
++fn note_missing(s: &str) {
++    if TRACK_MISSING.load(std::sync::atomic::Ordering::Relaxed) && s.chars().any(|c| c.is_ascii_alphabetic()) {
++        MISSING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(s.to_string());
++    }
++}
++
++/// 目前收集到的未翻譯字串。
++pub fn missing_strings() -> Vec<String> {
++    MISSING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
+ }
+ 
+ /// Like [`tr`], for an English string that needs a disambiguating `context`.
+diff --git a/crates/ui-egui/src/i18n/zh-hant.tsv b/crates/ui-egui/src/i18n/zh-hant.tsv
+index d5b3f7f..fcd693d 100644
+--- a/crates/ui-egui/src/i18n/zh-hant.tsv
++++ b/crates/ui-egui/src/i18n/zh-hant.tsv
+@@ -904,11 +904,11 @@
+ 	Timeline	時間軸
+ 	Tool Presets	工具預設集
+ 	Tools	工具
+-	About PhotoCraft	關於 PhotoCraft
+-	PhotoCraft Website	PhotoCraft 網站
+-	PhotoCraft on GitHub	GitHub 上的 PhotoCraft
+-	ArtCraft Website	ArtCraft 網站
+-	Join the ArtCraft Discord…	加入 ArtCraft Discord…
++	About PhotoCraft	關於 小柯圖像編輯
++	PhotoCraft Website	小柯圖像編輯 網站
++	PhotoCraft on GitHub	GitHub 上的 小柯圖像編輯
++	ArtCraft Website	小柯圖像編輯 網站
++	Join the ArtCraft Discord…	加入 小柯圖像編輯 Discord…
+ 	Report an Issue…	回報問題…
+ 	WIA Support…	WIA 支援…
+ 	Apply	套用
+@@ -963,7 +963,7 @@
+ 	All Caps	全部大寫
+ 	All Slices	所有切片
+ 	All User Slices	所有使用者切片
+-	All shortcuts reset to PhotoCraft defaults.	所有快速鍵已重設為 PhotoCraft 預設值。
++	All shortcuts reset to PhotoCraft defaults.	所有快速鍵已重設為 小柯圖像編輯 預設值。
+ 	Alt	Alt
+ 	Always use pressure for opacity	一律以壓力控制不透明度
+ 	Always use pressure for size	一律以壓力控制大小
+@@ -1217,8 +1217,8 @@
+ 	Drop an image or PSD anywhere to open it.	將影像或 PSD 拖放到任何位置即可開啟。
+ 	Native file drag-and-drop is unavailable	Wayland 不支援原生檔案拖放
+ 	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or copy the image in your file manager and paste it with {paste}.	Wayland 尚未支援原生檔案拖放。請使用「檔案 › 開啟」，或在檔案管理員中複製影像後使用 {paste} 貼上。
+-	To drop files, start PhotoCraft under XWayland: `{command}`	若要拖放檔案，請在 XWayland 下啟動 PhotoCraft：`{command}`
+-	Or set Preferences › Performance › Linux display server to X11: PhotoCraft then always starts under XWayland.	或將 偏好設定 › 效能 › Linux 顯示伺服器 設為 X11：PhotoCraft 之後一律在 XWayland 下啟動。
++	To drop files, start PhotoCraft under XWayland: `{command}`	若要拖放檔案，請在 XWayland 下啟動 小柯圖像編輯：`{command}`
++	Or set Preferences › Performance › Linux display server to X11: PhotoCraft then always starts under XWayland.	或將 偏好設定 › 效能 › Linux 顯示伺服器 設為 X11：小柯圖像編輯 之後一律在 XWayland 下啟動。
+ 	Edit › Paste	「編輯 › 貼上」
+ 	Duplicate Layers…	複製圖層…
+ 	Duplicate style	複製樣式
+@@ -1332,7 +1332,7 @@
+ 	Invert All	全部反轉
+ 	Invert has no settings.	負片效果沒有設定。
+ 	Italic	斜體
+-	Join us on Discord	加入我們的 Discord
++	Join us on Discord	前往專案網站
+ 	Justify all	全部齊行
+ 	Justify last centered	最後一行置中齊行
+ 	Justify last left	最後一行靠左齊行
+@@ -1469,9 +1469,9 @@
+ 	Perspective Warp is not active	透視彎曲未啟用
+ 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	透視彎曲：沿影像透視繪製平面，然後切換到彎曲
+ 	Photo Filter	相片濾鏡
+-	PhotoCraft	PhotoCraft
+-	PhotoCraft Manages Colors	PhotoCraft 管理色彩
+-	PhotoCraft — an open-source, native image editor written in Rust.	PhotoCraft — 以 Rust 撰寫的開放原始碼原生影像編輯器。
++	PhotoCraft	小柯圖像編輯
++	PhotoCraft Manages Colors	小柯圖像編輯 管理色彩
++	PhotoCraft — an open-source, native image editor written in Rust.	小柯圖像編輯 — 以 Rust 撰寫的開放原始碼原生影像編輯器。
+ 	Pin Depth:	圖釘深度：
+ 	Pixel Length:	像素長度：
+ 	Pixels/Centimeter	像素/公分
+@@ -1548,11 +1548,11 @@
+ 	Import Shortcuts…	匯入快速鍵…
+ 	Load a keyboard shortcut set saved as .kys	載入儲存為 .kys 的鍵盤快速鍵集
+ 	Imported {n} shortcuts from {file}. Click OK to keep them.	已從 {file} 匯入 {n} 個快速鍵。按一下「確定」即可保留。
+-	{n} commands are not in PhotoCraft.	{n} 個命令在 PhotoCraft 中不存在。
++	{n} commands are not in PhotoCraft.	{n} 個命令在 小柯圖像編輯 中不存在。
+ 	Keyboard shortcuts imported	已匯入鍵盤快速鍵
+ 	Your keyboard shortcut set {set} is in use here: {n} shortcuts differ from the defaults. Edit › Keyboard Shortcuts shows them; Reset All to Defaults undoes this.	此處正在使用你的鍵盤快速鍵集 {set}：{n} 個快速鍵與預設值不同。可在「編輯 › 鍵盤快速鍵」中查看；「全部重設為預設值」可復原。
+ 	Import keyboard shortcuts?	匯入鍵盤快速鍵？
+-	PhotoCraft found your keyboard shortcut set {set} from another image editor on this computer: {n} of its shortcuts differ from PhotoCraft's. Import it?	PhotoCraft 在這台電腦上找到你在其他影像編輯器中的鍵盤快速鍵集 {set}：其中 {n} 個快速鍵與 PhotoCraft 不同。要匯入嗎？
++	PhotoCraft found your keyboard shortcut set {set} from another image editor on this computer: {n} of its shortcuts differ from PhotoCraft's. Import it?	小柯圖像編輯 在這台電腦上找到你在其他影像編輯器中的鍵盤快速鍵集 {set}：其中 {n} 個快速鍵與 小柯圖像編輯 不同。要匯入嗎？
+ 	Edit › Keyboard Shortcuts › Reset All to Defaults undoes an import.	「編輯 › 鍵盤快速鍵 › 全部重設為預設值」可復原匯入。
+ 	Don't Import	不匯入
+ 	The keyboard shortcut set was not imported: {error}	未匯入鍵盤快速鍵集：{error}
+@@ -1743,7 +1743,7 @@
+ 	Apple Watch 45mm	Apple Watch 45mm
+ 	Aqua	水藍色
+ 	Art & Illustration	藝術與插畫
+-	ArtCraft	ArtCraft
++	ArtCraft	小柯圖像編輯
+ 	Background Eraser Tool	背景橡皮擦工具
+ 	Bevel & Emboss	斜角和浮雕
+ 	Blend Mode	混合模式
+@@ -1781,7 +1781,7 @@
+ 	Current Tool	目前工具
+ 	Custom Shape Tool	自訂形狀工具
+ 	Cyans	青色系
+-	Default PhotoCraft Size	預設 PhotoCraft 尺寸
++	Default PhotoCraft Size	預設 小柯圖像編輯 尺寸
+ 	Delete Workspace	刪除工作區
+ 	Diamond	菱形
+ 	Dimensions:	尺寸：
+@@ -1892,7 +1892,7 @@
+ 	Pen Tool	筆型工具
+ 	Convert Point Tool	轉換錨點工具
+ 	Photo	相片
+-	PhotoCraft website	PhotoCraft 網站
++	PhotoCraft website	小柯圖像編輯 網站
+ 	Picas	派卡
+ 	Pillow Emboss	枕狀浮雕
+ 	Pixel Replacement	像素取代
+@@ -2224,7 +2224,7 @@
+ 	System Info	系統資訊
+ 	More panels	更多面板
+ 	More documents	更多文件
+-	These settings aren't available in PhotoCraft yet.	這些設定在 PhotoCraft 中尚未提供。
++	These settings aren't available in PhotoCraft yet.	這些設定在 小柯圖像編輯 中尚未提供。
+ 	Graphics	圖形
+ 	Reset GPU Backend	重設 GPU 後端
+ 	Applies at next launch.	下次啟動時套用。
+@@ -2356,7 +2356,7 @@
+ 	Automatic uses GPU acceleration when available and falls back to CPU rendering on errors.	自動模式會在可用時使用 GPU 加速，發生錯誤時改用 CPU 渲染。
+ 	Switched to CPU rendering	已改用 CPU 渲染
+ 	GPU acceleration could not continue. Your documents are unchanged.	GPU 加速無法繼續。您的文件未變更。
+-	PhotoCraft is using the CPU image compositor. The window may still use your graphics adapter.	PhotoCraft 正使用 CPU 合成影像。視窗仍可能使用您的顯示卡。
++	PhotoCraft is using the CPU image compositor. The window may still use your graphics adapter.	小柯圖像編輯 正使用 CPU 合成影像。視窗仍可能使用您的顯示卡。
+ 	Retry GPU requires a restart. Save your work first.	重試 GPU 需要重新啟動。請先儲存您的工作。
+ 	Retry GPU tries the graphics processor again now.	重試 GPU 會立即再次嘗試使用圖形處理器。
+ 	GPU acceleration resumed.	已恢復 GPU 加速。
+@@ -2575,7 +2575,7 @@ fontWeight	Italic	斜體
+ 	Color to Alpha…	顏色轉為 Alpha…
+ 	Transparency Threshold	透明度臨界值
+ 	Opacity Threshold	不透明度臨界值
+-	PhotoCraft — Screen Color Picker	PhotoCraft — 螢幕取色器
++	PhotoCraft — Screen Color Picker	小柯圖像編輯 — 螢幕取色器
+ 	Rasterize svg groups deeper than	點陣化超過此深度的 SVG 群組
+ 	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	設為 0 可關閉此臨界值；巢狀超過 100 層的 SVG 群組一律會點陣化。
+ 	Rule of Thirds	三等分
+@@ -2881,7 +2881,7 @@ curves	Smooth	平滑
+ 	{name} (Photoshop)	{name}（Photoshop）
+ 	{message} ({note})	{message}（{note}）
+ @plural	Loaded {n} action from {file}|Loaded {n} actions from {file}	已從 {file} 載入 {n} 個動作
+-@plural	{n} step has no PhotoCraft equivalent yet|{n} steps have no PhotoCraft equivalent yet	{n} 個步驟在 PhotoCraft 中尚無對應功能
++@plural	{n} step has no PhotoCraft equivalent yet|{n} steps have no PhotoCraft equivalent yet	{n} 個步驟在 小柯圖像編輯 中尚無對應功能
+ @plural	Saved {n} action to {file}|Saved {n} actions to {file}	已將 {n} 個動作儲存到 {file}
+ @plural	{n} step with no Photoshop equivalent left out|{n} steps with no Photoshop equivalent left out	已略過 {n} 個沒有 Photoshop 對應功能的步驟
+ 	File Naming	檔案命名
+@@ -2944,17 +2944,17 @@ curves	Smooth	平滑
+ 	Kept {name}: written by another application	已保留 {name}：由其他應用程式寫入
+ 	Shadow Tint	陰影色調
+ 	Check for Updates…	檢查更新…
+-	PhotoCraft Updates	PhotoCraft 更新
++	PhotoCraft Updates	小柯圖像編輯 更新
+ 	Checking for updates…	正在檢查更新…
+ 	Open the release page to choose an installer for your system.	開啟發佈頁，選擇適合您系統的安裝程式。
+ 	Open Download Page	開啟下載頁面
+-	PhotoCraft is up to date.	PhotoCraft 已是最新版本。
++	PhotoCraft is up to date.	小柯圖像編輯 已是最新版本。
+ 	Could not check for updates.	無法檢查更新。
+ 	Updates have not been checked yet.	尚未檢查更新。
+ 	Check Again	重新檢查
+ 	Automatically Check for Updates	自動檢查更新
+ 	Installed version: {version}	已安裝版本：{version}
+-	PhotoCraft {version} is available.	PhotoCraft {version} 已發佈。
++	PhotoCraft {version} is available.	小柯圖像編輯 {version} 已發佈。
+ 	Paints from the History panel's source state	從步驟記錄面板的來源狀態繪畫
+ 	Sets the source for the history brush	設定步驟記錄筆刷的來源
+ 	Highlight Mode	亮部模式
+@@ -2985,12 +2985,12 @@ curves	Smooth	平滑
+ 	Bicubic Smoother	雙三次 (較平滑)
+ 	Bicubic Sharper	雙三次 (較銳利)
+ 	Pasting from other apps is unavailable	無法從其他應用程式貼上
+-	PhotoCraft can't reach the system clipboard in this session. On Wayland, a Flatpak sandbox hides the protocol that images from other apps are read through.	PhotoCraft 在此工作階段中無法存取系統剪貼簿。在 Wayland 上，Flatpak 沙盒會隱藏讀取其他應用程式影像所用的協定。
+-	To paste from other apps, start PhotoCraft under XWayland: `{command}`	若要從其他應用程式貼上，請在 XWayland 下啟動 PhotoCraft：`{command}`
+-	Nothing to paste: PhotoCraft can't read the system clipboard here	沒有可貼上的內容：PhotoCraft 在此無法讀取系統剪貼簿
++	PhotoCraft can't reach the system clipboard in this session. On Wayland, a Flatpak sandbox hides the protocol that images from other apps are read through.	小柯圖像編輯 在此工作階段中無法存取系統剪貼簿。在 Wayland 上，Flatpak 沙盒會隱藏讀取其他應用程式影像所用的協定。
++	To paste from other apps, start PhotoCraft under XWayland: `{command}`	若要從其他應用程式貼上，請在 XWayland 下啟動 小柯圖像編輯：`{command}`
++	Nothing to paste: PhotoCraft can't read the system clipboard here	沒有可貼上的內容：小柯圖像編輯 在此無法讀取系統剪貼簿
+ 	Delete this set	刪除此組合
+ 	New Set…	新增組合…
+-	PhotoCraft Defaults	PhotoCraft 預設值
++	PhotoCraft Defaults	小柯圖像編輯 預設值
+ 	Save a list of these shortcuts as a web page	將這些快速鍵的清單儲存為網頁
+ 	Save the changes to this set	將變更儲存到此組合
+ 	Save these shortcuts as a .kys file	將這些快速鍵儲存為 .kys 檔案
+@@ -3152,3 +3152,1540 @@ curves	Smooth	平滑
+ 	Select and Mask was closed: another layer was selected	已關閉「選取並遮住」：已選取另一個圖層
+ 	Drag to move the selected path	拖曳以移動選取的路徑
+ 	Edit Brush…	編輯筆刷…
++	(none)	(無)
++	10 fps	10 fps
++	15 fps	15 fps
++	24 fps	24 fps
++	25 fps	25 fps
++	30 fps	30 fps
++	32-bit Preview Options	32 位元預視選項
++	3D	3D
++	3D…	3D…
++	A:	A：
++	ACES	ACES
++	AI Integrations	AI 整合
++	About {app}	關於 {app}
++	Accented Edges	強調邊緣
++	Accurate	精確
++	Action playback failed: {error}	動作播放失敗：{error}
++	Actual Color	實際色彩
++	Actual Pixels	實際像素
++	Adaptive Wide Angle	自適應廣角
++	Add Mask	新增遮色片
++	Add Noise	增加雜訊
++	Add Pins	新增圖釘
++	Add a mask  (from the selection; ⌥ inverts)	新增遮色片 (依選取範圍；⌥ 反轉)
++	Add to	加入至
++	Add to selection  (⇧)	加入選取範圍 (⇧)
++	Added swatch {name}	已加入色票 {name}
++	Adds grain to the soft edges of the brush tip.	在筆刷尖端的柔和邊緣加入顆粒。
++	Adjust Interval For Loops	調整迴圈間隔
++	Adjustment	調整
++	Adjustment Layer	調整圖層
++	Adjustment Layers	調整圖層
++	Adjustment Properties	調整內容
++	Adobe Every-line Composer	Adobe 逐行排版器
++	Adobe PDF Presets…	Adobe PDF 預設集…
++	Adobe RGB (1998)	Adobe RGB (1998)
++	Adobe Single-line Composer	Adobe 單行排版器
++	Adobe-rgb-compat	Adobe RGB 相容
++	Advanced Blending	進階混合
++	Advanced Controls	進階控制項
++	Adwaita (Dark)	Adwaita (深色)
++	Adwaita (Light)	Adwaita (淺色)
++	After	之後
++	After (X)	之後 (X)
++	Airbrush: keeps painting while the pointer rests.	噴槍：指標停留時持續上色。
++	All shortcuts reset to Photoshop defaults.	所有快速鍵已重設為 Photoshop 預設值。
++	Alpha	Alpha
++	Alternates for Current Selection	目前選取項目的替代字形
++	Alternative	替代
++	Ambience	氛圍
++	Ambient	環境光
++	Amplitude Max	振幅 (最大)
++	Amplitude Min	振幅 (最小)
++	Angled Strokes	傾斜筆觸
++	Anisotropic	各向異性
++	Any	任一
++	Aperture	光圈
++	Apple RGB	Apple RGB
++	Apply Data Set	套用資料組
++	Apply Image	套用影像
++	Apply Layer Comp	套用圖層構圖
++	Apply Mask	套用遮色片
++	Apply to All	全部套用
++	Apply {option}: {state}	套用 {option}：{state}
++	Arbitrary	任意
++	Arc	弧形
++	Arc Lower	下弧形
++	Arc Upper	上弧形
++	Arch	拱形
++	Are you sure you want to quit?	確定要結束嗎？
++	Are you sure?	確定嗎？
++	Around Center	繞中心
++	Arrangement	排列
++	Arrows	箭頭
++	Artboard from Group	從群組建立工作區域
++	Artboard from Layers	從圖層建立工作區域
++	Artboards	工作區域
++	Artboards to Files	工作區域轉檔案
++	Artboards to PDF	工作區域轉 PDF
++	Artist	藝術家
++	Artistic	藝術風
++	Ask Before Saving Saved Embedded	儲存已儲存的嵌入項目前先詢問
++	Ask On Mismatch	不相符時詢問
++	Ask On Missing	缺少時詢問
++	Ask On Paste	貼上時詢問
++	Ask When Pasting	貼上時詢問
++	Assign Profile	指定描述檔
++	At	位置
++	Audio	音訊
++	Author	作者
++	Author Title	作者職稱
++	Auto Clean Brush	自動清潔筆刷
++	Auto Scale	自動縮放
++	Auto-Align Layers	自動對齊圖層
++	Auto-Blend Layers	自動混合圖層
++	Auto-Hide	自動隱藏
++	Auto-Leading	自動行距
++	Auto-leading %	自動行距 %
++	Automatically Create First Snapshot	自動建立第一個快照
++	Automatically Create New Snapshot When Saving	儲存時自動建立新快照
++	Autosave failed: {error}	自動儲存失敗：{error}
++	Avoid Widows/Orphans	避免孤行
++	Back	返回
++	Backend: {backend} ({type})	後端：{backend} ({type})
++	Background Level	背景層級
++	Bamboo	竹子
++	Bas Relief	浮雕
++	Base Tree Type	基本樹木類型
++	Based On	基於
++	Baseline Shift	基線位移
++	Basic Latin	基本拉丁文
++	Batch	批次處理
++	Before	之前
++	Bend	彎曲
++	Berries	漿果
++	Best	最佳
++	Black Clip	黑色修剪
++	Black Intensity	黑色強度
++	Blade Curvature	葉片曲度
++	Blast	爆破
++	Bleach Bypass	跳漂白
++	Blend Clipped Layers as Group	將剪裁圖層混合為群組
++	Blend Interior Effects as Group	將內部效果混合為群組
++	Blend RGB Colors Using Gamma 1.0	使用 Gamma 1.0 混合 RGB 色彩
++	Blend Text Gamma	混合文字 Gamma
++	Blending Mode	混合模式
++	Bloat	膨脹
++	Blocks	區塊
++	Blue Yellow	藍黃
++	Bold Italic	粗斜體
++	Border	邊框
++	Border Thickness	邊框粗細
++	Box Blur	方塊模糊
++	Bpc	黑點補償
++	Branches Color	枝條顏色
++	Branches Height	枝條高度
++	Branches Thickness	枝條粗細
++	Breeze Dark	Breeze 深色
++	Breeze Light	Breeze 淺色
++	Brick	磚塊
++	Bristle Detail	筆毛細節
++	Browse	瀏覽
++	Brush Detail	筆刷細節
++	Brush Size	筆刷大小
++	Brush Strokes	筆觸
++	Brush Type	筆刷類型
++	Bulge	凸起
++	Burlap	粗麻布
++	Byline	署名
++	Byline Title	署名職稱
++	CIE RGB	CIE RGB
++	CMYK:	CMYK：
++	CPU Rendering	CPU 算繪
++	Calculating…	計算中…
++	Calculations	計算
++	Camera Calibration	相機校正
++	Camera Make	相機廠牌
++	Camera Model	相機型號
++	Camera Raw	Camera Raw
++	Camera Raw Filter	Camera Raw 濾鏡
++	Cancel transform	取消變形
++	Candle Light	燭光
++	Canvas Size	畫布大小
++	Canvas rotation	畫布旋轉
++	Caption	說明
++	Caption Credits	說明來源
++	Capture Comp	擷取構圖
++	Case Sensitive	區分大小寫
++	Ccw	逆時針
++	Cell Size	格子大小
++	Center X	中心 X
++	Center Y	中心 Y
++	Chalk & Charcoal	粉筆和炭筆
++	Chalk Area	粉筆區域
++	Change Find	變更尋找內容
++	Changes Saved	變更已儲存
++	Changes have not been saved.	變更尚未儲存。
++	Change…	變更…
++	Channel1	色版 1
++	Channel2	色版 2
++	Channel3	色版 3
++	Channel4	色版 4
++	Charcoal	炭筆
++	Charcoal Area	炭筆區域
++	Charcoal Thickness	炭筆粗細
++	Check for Updates	檢查更新
++	Checkerboard	棋盤格
++	Choose Folder	選擇資料夾
++	Choose…	選擇…
++	Chrome	鉻金屬
++	Circle	圓形
++	Circularity	圓度
++	City	城市
++	Cleanliness	潔淨度
++	Clear Amount	清除量
++	Click the first point or press ↵ to close · Esc cancels	按一下第一個點或按 ↵ 以封閉 · Esc 取消
++	Click to add a point · drag off or ⌘/Ctrl-click or Delete to remove	按一下新增點 · 拖出、⌘/Ctrl+按一下或按 Delete 以移除
++	Click to apply, ⌥-click to clear overrides, double-click for Style Options	按一下以套用，⌥+按一下以清除覆寫，按兩下開啟樣式選項
++	Click to refresh histogram with uncached data	按一下以使用未快取的資料重新整理直方圖
++	Click to zoom in  ·  ⌥-click to zoom out	按一下以放大  ·  ⌥+按一下以縮小
++	Click: corner · Drag: smooth · Click first point: close · ↩ finish · Esc cancel	按一下：轉角 · 拖曳：平滑 · 按一下第一個點：封閉 · ↩ 完成 · Esc 取消
++	Clipping Mask	剪裁遮色片
++	Clipping Path	剪裁路徑
++	Clipping Path…	剪裁路徑…
++	Clone	仿製
++	Clone source set at {x}, {y}	已將仿製來源設定於 {x}，{y}
++	Close Window	關閉視窗
++	Clumped	成團
++	Cmyk	CMYK
++	Coarse Dots	粗網點
++	Coated-cmyk	塗佈紙 CMYK
++	Coerce to sRGB	強制轉為 sRGB
++	Collapse group  (⌥-click: all groups)	收合群組 (⌥+按一下：所有群組)
++	Color Decontaminate	色彩淨化
++	Color Halftone	彩色網屏
++	Color Indicates Masked Areas	色彩指示遮色片區域
++	Color Indicates Selected Areas	色彩指示選取區域
++	Color Lookup Tables	色彩查詢表
++	Color Management Policies	色彩管理原則
++	Color Noise Reduction	色彩雜訊減少
++	Color Picker	檢色器
++	Color Picker (Background Color)	檢色器 (背景色)
++	Color Picker (Custom Canvas Color)	檢色器 (自訂畫布顏色)
++	Color Picker (Foreground Color)	檢色器 (前景色)
++	Color Range	顏色範圍
++	Color Sampler Tool	色彩取樣器工具
++	Color Settings	色彩設定
++	Color Swatches	色票
++	Color indicates	色彩指示
++	Color management: {error}	色彩管理：{error}
++	ColorMatch RGB	ColorMatch RGB
++	ColorSync	ColorSync
++	Colored Pencil	彩色鉛筆
++	Commit Perspective Warp (↩)	確認透視彎曲 (↩)
++	Commit Puppet Warp (↩)	確認操控彎曲 (↩)
++	Commit any current edits (⌘↩)	確認目前所有編輯 (⌘↩)
++	Commit current crop operation  (↵)	確認目前的裁切作業 (↵)
++	Commit transform	確認變形
++	Commit transform (↩)	確認變形 (↩)
++	Commit warp (↩)	確認彎曲 (↩)
++	Compare	比較
++	Compatibility	相容性
++	Compose	合成
++	Condensed	窄體
++	Conditional Mode Change	條件式模式變更
++	Confirm	確認
++	Constraints	限制
++	Content-Aware Move	內容感知移動
++	Contrasty	高對比
++	Conté Crayon	康特蠟筆
++	Convert	轉換
++	Convert Frames > Video Layers	轉換影格 > 視訊圖層
++	Convert to Alpha Channel	轉換為 Alpha 色版
++	Convert to Grayscale	轉換為灰階
++	Convert to Linked	轉換為連結
++	Convert to Profile	轉換為描述檔
++	Convert to Shape…	轉換為形狀…
++	Cool	冷色
++	Cooling Filter (80)	冷卻濾鏡 (80)
++	Cooling Filter (82)	冷卻濾鏡 (82)
++	Cooling Filter (LBB)	冷卻濾鏡 (LBB)
++	Cooling L B B	冷卻濾鏡 (LBB)
++	Cooling80	冷卻濾鏡 (80)
++	Cooling82	冷卻濾鏡 (82)
++	Copy Complete Stroke	複製完整筆畫
++	Copy Fill	複製填色
++	Copyright Status	版權狀態
++	Copyright Url	版權網址
++	Copyrighted	有版權
++	Correct C A	校正色差
++	Correct Distortion	校正扭曲
++	Correct Vignette	校正暈影
++	Could not rename the action: {error}	無法重新命名動作：{error}
++	Couldn't open {name}: {error}	無法開啟 {name}：{error}
++	Couldn't save preferences: {error}. Retrying…	無法儲存偏好設定：{error}。正在重試…
++	Count:	計算：
++	Country	國家
++	Crack Brightness	裂紋亮度
++	Crack Depth	裂紋深度
++	Crack Spacing	裂紋間距
++	Craquelure	裂紋
++	Create By	建立依據
++	Create Date	建立日期
++	Create Multiple Picture Packages	建立多個圖片套件
++	Create Snapshot	建立快照
++	Create Vector Mask	建立向量遮色片
++	Create a new layer  (⇧⌘N)	建立新圖層 (⇧⌘N)
++	Create new count group	建立新的計算群組
++	Create new layer	建立新圖層
++	Create new set	建立新組
++	Create…	建立…
++	Credit	來源
++	Cross Process	交叉沖印
++	Crosshatch	交叉線
++	Crystallize	結晶
++	Currency	貨幣
++	Current	目前
++	Current Time	目前時間
++	Curve Darks	曲線 (暗調)
++	Curve Highlights	曲線 (亮部)
++	Curve Lights	曲線 (亮調)
++	Curve Shadows	曲線 (陰影)
++	Curve Splits	曲線 (分割點)
++	Custom Branch Color	自訂枝條顏色
++	Custom Pixel Aspect Ratio	自訂像素長寬比
++	Custom pattern	自訂圖樣
++	Cutout	剪貼畫
++	Cw	順時針
++	Cyrillic	西里爾文
++	Daisies	雛菊
++	Dark Gray	深灰
++	Dark Intensity	暗部強度
++	Dark Rough	暗粗糙
++	Dark Strokes	暗筆觸
++	Darken Only	僅變暗
++	Darkness	暗度
++	Data	資料
++	Data Set: {name}  ({index}/{total})	資料組：{name} ({index}/{total})
++	Data Sets as Files	資料組轉檔案
++	Date	日期
++	Date Created	建立日期
++	Date and Time	日期與時間
++	DateTime Original	拍攝日期時間
++	Day For Night	日夜轉換
++	De-Interlace	去除交錯
++	Decrease Type Size	縮小文字大小
++	Decrease Type Size by 10	將文字大小縮小 10
++	Deep	深
++	Deep Blue	深藍
++	Deep Emerald	深翠綠
++	Deep Red	深紅
++	Deep Yellow	深黃
++	Default Foreground and Background Colors	預設前景色和背景色
++	Default Leaves	預設葉片
++	Default Photoshop Size	預設 Photoshop 大小
++	Defaults	預設值
++	Defaults restored.	已還原預設值。
++	Define Brush Preset	定義筆刷預設集
++	Define Custom Shape	定義自訂形狀
++	Define Pattern	定義圖樣
++	Definition	清晰度
++	Defringe	去除邊緣
++	Degrees	度
++	Delete Channel	刪除色版
++	Delete Hidden Layers	刪除隱藏的圖層
++	Delete Layer…	刪除圖層…
++	Delete Mask	刪除遮色片
++	Delete Path	刪除路徑
++	Delete Pins	刪除圖釘
++	Delete Preset…	刪除預設集…
++	Delete Smart Filters	刪除智慧型濾鏡
++	Delete Snapshot	刪除快照
++	Delete…	刪除…
++	Depth Map	深度圖
++	Depth Mode	深度模式
++	Desaturate Monitor Colors By	螢幕色彩降低飽和度
++	Detect Faces	偵測臉部
++	Diameter	直徑
++	Diffuse	擴散
++	Diffuse Glow	擴散光暈
++	Digits	數字
++	Direction Balance	方向平衡
++	Direction of Stroke	筆觸方向
++	Disable	停用
++	Disable Mask	停用遮色片
++	Disable Symmetry Path	停用對稱路徑
++	Disabled	已停用
++	Discard Changes	放棄變更
++	Displace	位移
++	Display	顯示
++	Display profile not used	未使用顯示描述檔
++	Display profiles: {reason}	顯示描述檔：{reason}
++	Display-p3	Display P3
++	Distortion	扭曲
++	Distribution	分佈
++	Do you want to save you made to “{name}” before quitting?	結束前要儲存對「{name}」所做的變更嗎？
++	Document Size	文件大小
++	Documentation	說明文件
++	Documents	文件
++	Dodge/Burn	加亮/加深
++	Dont Enlarge	不放大
++	Dot	點
++	Double Line	雙線
++	Draft	草稿
++	Drag (lasso) or click points (polygonal) · {add} add · {sub} subtract	拖曳 (套索) 或按一下以指定點 (多邊形) · {add} 加入 · {sub} 減去
++	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · {commit} commits · Esc cancels	拖曳出裁切框 · 在框內拖曳可移動 · 拖曳邊緣可調整大小 ({ratio} 比例，{centre} 中心) · 繪製時按空白鍵可移動 · {commit} 確認 · Esc 取消
++	Drag on the image to add a constraint; Shift for horizontal/vertical; right-click to delete.	在影像上拖曳以新增限制線；按住 Shift 可限制水平/垂直；按右鍵可刪除。
++	Drag to move the active shape's path or the Work Path	拖曳以移動作用中形狀的路徑或工作路徑
++	Drag to move the layer	拖曳以移動圖層
++	Drag: draw freehand · Release on the start point: close	拖曳：徒手繪製 · 在起點放開：封閉
++	Drawn on the CPU: {reason}. Click for System Info.	由 CPU 繪製：{reason}。按一下可查看系統資訊。
++	Driver: {driver}	驅動程式：{driver}
++	Dry Brush	乾筆刷
++	Duplicate	複製
++	Duplicate Channel	複製色版
++	Duplicate Layer Comp	複製圖層構圖
++	Duplicate Layers	複製圖層
++	Duplicate Path	複製路徑
++	Duplicated selection name	複製的選取範圍名稱
++	Duplication	重複
++	Duration	持續時間
++	Dust & Scratches	灰塵與刮痕
++	Dynamics	動態
++	EXIF Version	EXIF 版本
++	Edge Brightness	邊緣亮度
++	Edge Extension	邊緣延伸
++	Edge Fidelity	邊緣保真度
++	Edge Intensity	邊緣強度
++	Edge Only	僅邊緣
++	Edge Simplicity	邊緣簡化度
++	Edge Thickness	邊緣粗細
++	Edge Width	邊緣寬度
++	Edit Toolbar	編輯工具列
++	Edit…	編輯…
++	Elevation	仰角
++	Eliminate	消除
++	Email	電子郵件
++	Embed profiles	嵌入描述檔
++	Enable	啟用
++	Enable Mask	啟用遮色片
++	Enable Smart Filters	啟用智慧型濾鏡
++	Enable Timeline Quick Config	啟用時間軸快速設定
++	End X	結束 X
++	End Y	結束 Y
++	Enlarged	已放大
++	Enter description…	輸入說明…
++	Erase with Brush or Pencil (hold)	以筆刷或鉛筆擦除 (按住)
++	Error File	錯誤檔案
++	Errors	錯誤
++	Even Fields	偶數圖場
++	Exit Quick Mask	結束快速遮色片
++	Expand All Groups	展開所有群組
++	Expand group  (⌥-click: all groups)	展開群組 (⌥+按一下：所有群組)
++	Export As	匯出為
++	Export As: {name}	匯出為：{name}
++	Export Contents	匯出內容
++	Export Image	匯出影像
++	Export Options	匯出選項
++	Export Preferences	匯出偏好設定
++	Export Settings	匯出設定
++	Export to	匯出至
++	Export/Import Presets	匯出/匯入預設集
++	Exported contents to {path}	已將內容匯出至 {path}
++	Exported presets to {path}	已將預設集匯出至 {path}
++	Exported {n} files	已匯出 {n} 個檔案
++	Exported {path}	已匯出 {path}
++	Exported {path} ({size})	已匯出 {path} ({size})
++	Exporting…	匯出中…
++	Exposure Program	曝光程式
++	Extensions	擴充功能
++	Extra Bold	特粗
++	Extra Light	特細
++	Extrude	擠出
++	F	F
++	Faded Film	褪色底片
++	Failed	失敗
++	Failed to open file	無法開啟檔案
++	Failed to save file	無法儲存檔案
++	Fallback: {reason}	備援：{reason}
++	Fast	快速
++	Feather Radius	羽化半徑
++	Fiber Length	纖維長度
++	Fibers	纖維
++	Field Blur	區域模糊
++	File Format	檔案格式
++	File Info	檔案資訊
++	File Name	檔案名稱
++	File Size	檔案大小
++	File not found	找不到檔案
++	Filename	檔名
++	Fill Color	填滿顏色
++	Fill Light	補光
++	Fill Path	填滿路徑
++	Fill Path…	填滿路徑…
++	Fill with Background Color	以背景色填滿
++	Fill with Background Color, Preserve Transparency	以背景色填滿，保留透明度
++	Fill with Foreground Color	以前景色填滿
++	Fill with Foreground Color, Preserve Transparency	以前景色填滿，保留透明度
++	Film Grain	底片顆粒
++	Filter Gallery	濾鏡收藏館
++	Find	尋找
++	Find and Replace Text	尋找及取代文字
++	Fine	細緻
++	Fine Dots	細網點
++	Finish	完成
++	First Color Readout	第一個色彩讀數
++	First Line Indent	首行縮排
++	Fish	魚形
++	Fit Image	符合影像
++	Fit Layer on Screen	圖層符合螢幕大小
++	Fit to Window	符合視窗
++	Flag	旗形
++	Flame	火焰
++	Flame Bottom Alignment	火焰底部對齊
++	Flame Lines	火焰線條
++	Flame Shape	火焰形狀
++	Flame Style	火焰樣式
++	Flame Type	火焰類型
++	Flash	閃光燈
++	Flat	平面
++	Flat Shading	平面著色
++	Flatten Frames Into Clips	將影格平面化為片段
++	Flatten Frames Into Layers	將影格平面化為圖層
++	Flow:	流量：
++	Flower Color	花朵顏色
++	Focal Distance	對焦距離
++	Focal Length35mm	35mm 等效焦距
++	Focus	對焦
++	Focus Area	對焦區域
++	Foreground Level	前景層級
++	Forward	前進
++	Forward Warp	向前彎曲
++	Frame	影格
++	Frame Duration	影格持續時間
++	Frame Sync	影格同步
++	Free Transform Path	任意變形路徑
++	Freeze Lasso	凍結套索
++	Freeze Mask	凍結遮色片
++	Fresco	壁畫
++	From Left	從左側
++	From Right	從右側
++	Frosted	霧面
++	Full Screen	全螢幕
++	Fullscreen	全螢幕
++	Fuzziness	朦朧程度
++	GPS	GPS
++	GPU backend preference: {backend}	GPU 後端偏好：{backend}
++	GPU device was lost; using the CPU renderer.	GPU 裝置已遺失，改用 CPU 轉譯。
++	GPU error; using the CPU renderer.	GPU 發生錯誤，改用 CPU 轉譯。
++	GPU retry scheduled	已排定重試 GPU
++	Gaussian Blur	高斯模糊
++	General Blend	一般混合
++	General Blending	一般混合
++	General Brushes	一般筆刷
++	Generators	產生器
++	Generic	一般
++	Glass	玻璃
++	Global Light	整體光源
++	Gloss	光澤
++	Glow Amount	光暈量
++	Glow Brightness	光暈亮度
++	Glow Size	光暈大小
++	Glowing Edges	邊緣光暈
++	Glyph	字符
++	Glyph Scaling	字符縮放
++	Go to Layer	前往圖層
++	Good	良好
++	Grade Balance	色彩分級平衡
++	Grade Blending	色彩分級混合
++	Grade Global	色彩分級 (整體)
++	Grade Highlights	色彩分級 (亮部)
++	Grade Midtones	色彩分級 (中間調)
++	Grade Shadows	色彩分級 (陰影)
++	Grain Amount	顆粒量
++	Grain Roughness	顆粒粗糙度
++	Grain Size	顆粒大小
++	Grain Type	顆粒類型
++	Graininess	顆粒度
++	Grainy Dots	顆粒點
++	Graphic Pen	繪圖筆
++	Graphic and web	繪圖與網頁
++	Graphics adapter	顯示卡
++	Graphics adapter: {adapter}	顯示卡：{adapter}
++	Gray Value (Maximum)	灰階值 (最大)
++	Gray Value (Mean)	灰階值 (平均)
++	Gray Value (Median)	灰階值 (中位數)
++	Gray Value (Minimum)	灰階值 (最小)
++	Gray-gamma-2.2	灰階 Gamma 2.2
++	Gray:	灰階：
++	Greek	希臘文
++	Grid  (⌘')	格點  (⌘')
++	Grid view	格狀檢視
++	Group from Layers	從圖層建立群組
++	Group · {n} layer	群組 · {n} 個圖層
++	Groups	群組
++	Grout Width	填縫寬度
++	Guide Layout…	參考線版面配置…
++	HDR Toning	HDR 色調
++	HDTV (Rec. 709)	HDTV (Rec. 709)
++	HSB Color	HSB 色彩
++	HSL/Grayscale	HSL/灰階
++	Halftone Pattern	半色調網屏
++	Hand	手形
++	Hand Tool (hold)	手形工具 (按住)
++	Hanging Punctuation	標點懸掛
++	Heal	修復
++	Heal Auto	自動修復
++	Heal Color	修復色彩
++	Heal Off	關閉修復
++	Heal On	開啟修復
++	Healing	修復
++	Hearts	愛心
++	Heptagon	七邊形
++	Hexagon	六邊形
++	Hidden	已隱藏
++	Hide	隱藏
++	Hide Grid	隱藏格點
++	Hide Others	隱藏其他
++	Hide the layer's effects  (⌥-click: all layers)	隱藏圖層效果  (⌥ 點擊：所有圖層)
++	Hide {app}	隱藏 {app}
++	High Pass	高反差保留
++	Highlight	亮部
++	Highlight Amount	亮部量
++	Highlight Area	亮部範圍
++	Highlight Radius	亮部半徑
++	Highlight Strength	亮部強度
++	Highlight Tone	亮部色調
++	Horizontal Distortion	水平扭曲
++	Horizontal Only	僅水平
++	Hotspot	熱點
++	Hsb	HSB
++	Hsl	HSL
++	Hsl Hue	HSL 色相
++	Hsl Lum	HSL 明亮度
++	Hsl Sat	HSL 飽和度
++	Humidity	濕度
++	ISO	ISO
++	ISO Speed	ISO 感光度
++	Image Balance	影像平衡
++	Image Processor	影像處理器
++	Image compositor: {processor}	影像合成器：{processor}
++	Import Brushes	匯入筆刷
++	Import Brushes… (.abr)	匯入筆刷… (.abr)
++	Import Image	匯入影像
++	Import Options	匯入選項
++	Import Photoshop brushes (.abr)	匯入 Photoshop 筆刷 (.abr)
++	Import Settings	匯入設定
++	Importing {what} from {file}…	正在從 {file} 匯入 {what}…
++	Importing…	正在匯入…
++	Import…	匯入…
++	In	向內
++	In Black	輸入黑點
++	In White	輸入白點
++	Include ICC Profile	包含 ICC 描述檔
++	Increase Type Size	增加文字大小
++	Increase Type Size by 10	將文字大小增加 10
++	Industry Standard	業界標準
++	Infinite	無限
++	Inflate	膨脹
++	Info Options…	資訊選項…
++	Information	資訊
++	Initial Direction of Stroke	筆畫起始方向
++	Ink Outlines	墨水輪廓線
++	Input	輸入
++	Input Levels	輸入色階
++	Input Mode	輸入模式
++	Install Plug-in	安裝增效模組
++	Integrated Density	積分密度
++	Intensity	強度
++	Intent	意圖
++	Interpret Footage	轉譯素材
++	Intersect with	與其相交
++	Intersect with selection  (⇧⌥)	與選取範圍相交  (⇧⌥)
++	Interval	間隔
++	Invalid panel layout; restored the default dock	面板配置無效，已還原預設停駐區
++	Invert Mask	反轉遮色片
++	Invert Selection	反轉選取範圍
++	Iris Blur	光圈模糊
++	Ivy	常春藤
++	Jag	鋸齒
++	Join the ArtCraft Discord	加入小柯圖像編輯的 Discord
++	Join the ArtCraft Discord ({url})	加入小柯圖像編輯的 Discord ({url})
++	Justification	對齊方式
++	Justify	左右對齊
++	Keep proportions	維持比例
++	Keep view in sync	同步檢視
++	Keeps the current texture when switching presets.	切換預設集時保留目前的紋理。
++	Kernel	核心
++	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	字距微調：度量、視覺，或以 1/1000 em 為單位的數值 (在插入點按 Alt+←/→)
++	Keyboard	鍵盤
++	Keywords	關鍵字
++	Label	標籤
++	Last Modified	上次修改
++	Latin 1	拉丁文 1
++	Latin Extended-A	拉丁文擴充-A
++	Latin Extended-B	拉丁文擴充-B
++	Layer Comp	圖層複合
++	Layer Comps to Files	圖層複合轉檔案
++	Layer Content Options	圖層內容選項
++	Layer From Background	從背景建立圖層
++	Layer Mask Hides Effects	圖層遮色片隱藏效果
++	Layer Properties	圖層內容
++	Layer Styles	圖層樣式
++	Layer from Background	從背景建立圖層
++	Layers to Files	圖層轉檔案
++	Leaf Color	葉片顏色
++	Learn More	瞭解更多
++	Leaves Amount	葉片數量
++	Leaves Color	葉片顏色
++	Leaves Size	葉片大小
++	Left Diagonal	左斜線
++	Legacy	舊版
++	Length	長度
++	Lens	鏡頭
++	Lens Blur	鏡頭模糊
++	Lens Correction	鏡頭校正
++	Lens Corrections	鏡頭校正
++	Lens Flare	鏡頭光暈
++	Lens Info	鏡頭資訊
++	Less	較少
++	Letter Spacing	字母間距
++	Level Based	依層級
++	Level:	層級：
++	Libraries	資料庫
++	Library	資料庫
++	Ligature	連字
++	Light Dark Balance	明暗平衡
++	Light Direction	光線方向
++	Light Intensity	光線強度
++	Light Rough	明亮粗糙
++	Light Source	光源
++	Light Type	光源類型
++	Light X	光源 X
++	Light Y	光源 Y
++	Light Z	光源 Z
++	Lighten Grout	淡化填縫
++	Lighten Only	僅變亮
++	Lighting	光照
++	Lighting Effects	光照效果
++	Limit Playback	限制播放
++	Linear Dodge	線性加亮
++	Linear-srgb	線性 sRGB
++	Link	連結
++	Liquify	液化
++	List	清單
++	List view	清單檢視
++	Live Preview	即時預視
++	Load 3D LUT	載入 3D LUT
++	Load Files into Stack	將檔案載入堆疊
++	Load Selection	載入選取範圍
++	Loading…	載入中…
++	Localize Color Clusters	區域化色彩群集
++	Lock All	鎖定全部
++	Lock Image Pixels	鎖定影像像素
++	Lock Position	鎖定位置
++	Lock Transparent Pixels	鎖定透明像素
++	Locked	已鎖定
++	Log Errors To File	將錯誤記錄至檔案
++	Long Lines	長線條
++	Long Strokes	長筆觸
++	Loop	循環
++	Lower	下移
++	Lum	明亮度
++	Luminance Smoothness	明亮度平滑度
++	Lut	LUT
++	Mac Crisp	Mac 清晰
++	Mac LCD	Mac LCD
++	Mac OS	Mac OS
++	Mac Sharp	Mac 銳利
++	Mac Smooth	Mac 平滑
++	Mac Strong	Mac 強烈
++	Magnetic Lasso	磁性套索
++	Make	製造商
++	Make Selection from Path	從路徑建立選取範圍
++	Make Selection…	建立選取範圍…
++	Make Symmetry Path	建立對稱路徑
++	Make Work Path	建立工作路徑
++	Make Work Path…	建立工作路徑…
++	Manual	手動
++	Map Document	對應文件
++	Map Layer	對應圖層
++	Map Path	對應路徑
++	Mask	遮色片
++	Mask Channel	遮色片色版
++	Mask Incomplete Blocks	遮蔽不完整區塊
++	Mask None	無遮色片
++	Masks	遮色片
++	Match Color	符合顏色
++	Math Symbols	數學符號
++	Max Offset	最大位移
++	Max Radius	最大半徑
++	Measure	測量
++	Medium Dots	中等點
++	Medium Gray	中灰
++	Medium Lines	中等線條
++	Medium Strokes	中等筆觸
++	Merge Channels…	合併色版…
++	Merge Spot Channel	合併特別色色版
++	Merge to HDR Pro	合併為 HDR Pro
++	Metallic	金屬
++	Metering Mode	測光模式
++	Mezzotint	銅版畫
++	Middle	中間
++	Midtone	中間調
++	Minimalistic	極簡
++	Missing Profiles: Ask When Opening	遺失描述檔：開啟時詢問
++	Modify Date	修改日期
++	Monitor Profile	螢幕描述檔
++	Monitor profile in use on {display}: {profile}	{display} 上使用中的螢幕描述檔：{profile}
++	Monitor profile in use: {profile}	使用中的螢幕描述檔：{profile}
++	Monitor profile on {display} (main window): {profile}	{display} 上的螢幕描述檔 (主視窗)：{profile}
++	Monitor profile on {display}: {profile}	{display} 上的螢幕描述檔：{profile}
++	Monitor profile: {profile}	螢幕描述檔：{profile}
++	Mono Contrast	單色對比
++	Monochromatic	單色
++	More	更多
++	Mosaic	馬賽克
++	Mosaic Tiles	馬賽克拼貼
++	Motion Blur	動態模糊
++	Mouse	滑鼠
++	Mouse Controls	滑鼠操作
++	Mouse Coordinates	滑鼠座標
++	Move Down	下移
++	Move Layer	移動圖層
++	Move Up	上移
++	Movie Prime	電影定焦鏡頭
++	Multiple Flames Along Path	沿路徑多個火焰
++	Multiple Flames One Direction	單一方向多個火焰
++	Multiple Flames Path Directions	路徑方向多個火焰
++	Multiple Flames Various Length	不同長度多個火焰
++	NTSC (1953)	NTSC (1953)
++	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or run PhotoCraft under XWayland with `WAYLAND_DISPLAY= photocraft`.	Wayland 尚未支援原生檔案拖放。請使用「檔案 › 開啟」，或在 XWayland 下以 `WAYLAND_DISPLAY= photocraft` 執行小柯圖像編輯。
++	Nearest	最近鄰
++	Neon Glow	霓虹光暈
++	Neutralize	中和
++	New Brush	新增筆刷
++	New Brush Preset	新增筆刷預設集
++	New Channel	新增色版
++	New Channel…	新增色版…
++	New Guide	新增參考線
++	New Guide Layout	新增參考線版面配置
++	New Layer Comp	新增圖層複合
++	New Layer from Brush	從筆刷新增圖層
++	New Path	新增路徑
++	New Selection	新增選取範圍
++	New Spot Channel…	新增特別色色版…
++	New Tool Preset	新增工具預設集
++	New Video Group	新增視訊群組
++	New Video Layer	新增視訊圖層
++	New Video Layer from File	從檔案新增視訊圖層
++	New Window	新增視窗
++	New channel only	僅新增色版
++	New document	新增文件
++	New document…     ⌘N	新增文件…     ⌘N
++	Newspaper	報紙
++	Next	下一個
++	No Document	沒有文件
++	No Image	沒有影像
++	No Layer Comps	沒有圖層複合
++	No Layers	沒有圖層
++	No Results	沒有結果
++	No Results Found	找不到結果
++	No Selection	沒有選取範圍
++	No custom shape "{name}": pick one in the options bar or Window › Shapes	沒有自訂形狀「{name}」：請在選項列或「視窗 › 形狀」中選取一個
++	No layers	沒有圖層
++	No recent files	沒有最近檔案
++	No selection	沒有選取範圍
++	Noise Color	雜訊 (色彩)
++	Noise Color Detail	雜訊 (色彩細節)
++	Noise Luminance	雜訊 (明亮度)
++	Noise Luminance Detail	雜訊 (明亮度細節)
++	Nonlinear History	非線性步驟記錄
++	Note Paper	筆記紙
++	Note tool	註解工具
++	Nothing to Redo	沒有可重做的項目
++	Nothing to Undo	沒有可復原的項目
++	Nothing to paste: the clipboard holds no image	沒有可貼上的內容：剪貼簿中沒有影像
++	Number Of Levels	色階數
++	Numbers	數字
++	Object Name / Title	物件名稱 / 標題
++	Ocean Ripple	海洋波紋
++	Octagon	八邊形
++	Odd Fields	奇數圖場
++	Oil Paint	油畫
++	On	開啟
++	One Flame Along Path	沿路徑單一火焰
++	Opacity Mask	不透明度遮色片
++	Open As	開啟為
++	Open File	開啟檔案
++	Open Folder	開啟資料夾
++	Open Image	開啟影像
++	Open Recent is unavailable on the web	網頁版無法使用「最近開啟的檔案」
++	Opened {url}	已開啟 {url}
++	Opening	開啟中
++	Open…     ⌘O	開啟…     ⌘O
++	Operation	操作
++	Operation canceled	操作已取消
++	Operation cancelled	操作已取消
++	Operation completed	操作已完成
++	Operation failed	操作失敗
++	Out	向外
++	Out Black	輸出黑點
++	Out From Center	從中心向外
++	Out White	輸出白點
++	Out of memory	記憶體不足
++	Output Levels	輸出色階
++	Oval	橢圓形
++	Overlay Edge	重疊邊緣
++	Override Action "Save" Commands	覆寫動作的「儲存」命令
++	PAL/SECAM	PAL/SECAM
++	PDF Presentation…	PDF 簡報…
++	Package	封裝
++	Page Setup…	頁面設定…
++	Paint Daubs	繪畫筆觸
++	Palette Knife	調色刀
++	Panel	面板
++	Paper Brightness	紙張亮度
++	Parallel	平行
++	Paste Complete Stroke	貼上完整筆畫
++	Paste Fill	貼上填色
++	Patch	修補
++	Patchwork	拼綴圖
++	Path Blur	路徑模糊
++	Path to Illustrator…	路徑轉 Illustrator…
++	Path:	路徑：
++	Paths to Illustrator	路徑轉 Illustrator
++	Pattern Fill…	圖樣填色…
++	Pattern Type	圖樣類型
++	Pen	鋼筆
++	Pencil Tool	鉛筆工具
++	Pencil Width	鉛筆寬度
++	Pentagon	五邊形
++	Percentage	百分比
++	Percentile:	百分位數：
++	Perimeter	周長
++	Permission denied	權限遭拒
++	Perspective Crop	透視裁切
++	Phone	手機
++	Photo (2 × 3 in)	相片 (2 × 3 in)
++	Photo (4 × 6 in)	相片 (4 × 6 in)
++	Photo (5 × 7 in)	相片 (5 × 7 in)
++	Photo (8 × 10 in)	相片 (8 × 10 in)
++	PhotoCraft keeps retrying; until a save succeeds, preference changes are lost when it closes.	小柯圖像編輯會持續重試；在儲存成功之前，關閉程式時偏好設定的變更會遺失。
++	Photocopy	影印
++	Photomerge	合併相片
++	Pick Color From Image	從影像拾取顏色
++	Picture Frame	相框
++	Picture Package…	圖片集合…
++	Pinch	擠壓
++	Pins	圖釘
++	Pixel	像素
++	Place Embedded	置入內嵌物件
++	Place Linked	置入連結的物件
++	Place Scale Marker	放置比例標記
++	Plane	平面
++	Planes	平面
++	Plaster	石膏
++	Plastic Wrap	塑膠包裝
++	Platform: {os} {arch}	平台：{os} {arch}
++	Play Once	播放一次
++	Please wait…	請稍候…
++	Point	點
++	Point Curve	點曲線
++	Point Curve Blue	點曲線 (藍)
++	Point Curve Green	點曲線 (綠)
++	Point Curve Red	點曲線 (紅)
++	Pointed	尖角
++	Pointillize	點狀化
++	Polar Coordinates	極座標
++	Polar To Rectangular	極座標轉直角座標
++	Policy Cmyk	CMYK 原則
++	Policy Gray	灰階原則
++	Policy Rgb	RGB 原則
++	Pond Ripples	池塘漣漪
++	Poster Edges	海報邊緣
++	Posterization	色調分離
++	Preferences can't be saved	無法儲存偏好設定
++	Preferences saved	偏好設定已儲存
++	Preferences were reset: {error}	偏好設定已重設：{error}
++	Preferences…	偏好設定…
++	Preserve	保留
++	Preset Manager	預設集管理員
++	Preset Name:	預設集名稱：
++	Press keys	請按下按鍵
++	Preview Image	預視影像
++	Previous	上一個
++	Prime105	定焦 105mm
++	Prime35	定焦 35mm
++	Printed to {path}	已列印至 {path}
++	ProPhoto	ProPhoto
++	ProPhoto RGB	ProPhoto RGB
++	Processing…	處理中…
++	Profile Mismatches: Ask When Opening	描述檔不符：開啟時詢問
++	Proof Setup…	校樣設定…
++	Prophoto-compat	ProPhoto 相容
++	Province / State	縣市 / 州省
++	Public Domain	公共領域
++	Pucker	縮攏
++	Punctuation	標點符號
++	Push Left	向左推移
++	Pyramids	金字塔
++	Quick Selection	快速選取
++	Quick Sync	Quick Sync
++	Quit	結束
++	Quit PhotoCraft	結束小柯圖像編輯
++	Quit {app}	結束 {app}
++	R G B	R G B
++	R g b	RGB
++	RGB	RGB
++	RGB:	RGB：
++	Radial Blur	放射狀模糊
++	Radius X	半徑 X
++	Radius Y	半徑 Y
++	Ran script {name}	已執行指令碼 {name}
++	Randomize Length	隨機化長度
++	Randomize Shapes	隨機化形狀
++	Raw Data	Raw 資料
++	Raw Defaults	RAW 預設值
++	Reading	讀取中
++	Ready	就緒
++	Rec2020	Rec2020
++	Recent Files	最近檔案
++	Recent Items	最近使用的項目
++	Reconstruct All	全部重建
++	Recovered {name}	已救回 {name}
++	Recovery	資料救援
++	Rectangle	矩形
++	Rectangular Selection	矩形選取
++	Rectangular To Polar	直角座標轉極座標
++	Red Cyan	紅青
++	Reduce Color Noise	減少色彩雜訊
++	Reduce Noise	減少雜訊
++	Refine Edge…	調整邊緣…
++	Release Notes	版本資訊
++	Relief	浮雕
++	Relink to File	重新連結至檔案
++	Remove All	全部移除
++	Remove Jpeg Artifact	移除 JPEG 失真
++	Rename Brush	重新命名筆刷
++	Rename Channel…	重新命名色版…
++	Rename Group	重新命名群組
++	Rename Layer Comp	重新命名圖層構圖
++	Rename Tool Preset	重新命名工具預設集
++	Render Video	轉譯影片
++	Rendering…	轉譯中…
++	Reorder Layer	重新排列圖層
++	Repeat	重複
++	Replace Color	取代顏色
++	Replace Contents	取代內容
++	Replace Footage	取代素材
++	Report a Bug	回報錯誤
++	Report an Issue	回報問題
++	Reset All	全部重設
++	Reset Essentials	重設基本功能
++	Reset Preferences	重設偏好設定
++	Resolve Missing Fonts	解決遺失的字體
++	Restart	重新啟動
++	Restart Required	需要重新啟動
++	Restore last viewed comp	還原上次檢視的構圖
++	Resume	繼續
++	Reticulation	網狀
++	Retry	重試
++	Rgb	RGB
++	Ridges	山脊
++	Right Diagonal	右斜線
++	Ripple	漣漪
++	Ripple Magnitude	漣漪強度
++	Ripple Size	漣漪大小
++	Rise	上升
++	Roman	羅馬
++	Roman Hanging Punctuation	羅馬字懸掛標點
++	Rope	繩索
++	Roses	玫瑰
++	Rotate Auto	自動旋轉
++	Rotate Fixed	固定旋轉
++	Rough Pastels	粗糙粉蠟筆
++	Rounded Rectangle Tool	圓角矩形工具
++	Row Order	列順序
++	Ruler	尺標
++	Ruler Units	尺標單位
++	Rulers  (⌘R)	尺標  (⌘R)
++	SMPTE C	SMPTE C
++	Sample Size	取樣大小
++	Sampler	取樣器
++	Sandstone	砂岩
++	Sat	飽和度
++	Save As	另存新檔
++	Save Changes	儲存變更
++	Save File	儲存檔案
++	Save Image	儲存影像
++	Save Path	儲存路徑
++	Save Selection	儲存選取範圍
++	Save a Copy	儲存拷貝
++	Save before closing?	關閉前要先儲存嗎？
++	Save for Web (Legacy)	儲存為網頁用 (舊版)
++	Save your work and restart PhotoCraft to retry GPU acceleration. CPU rendering remains active for this session.	請儲存您的作品並重新啟動小柯圖像編輯，以重試 GPU 加速。本次工作階段仍會使用 CPU 轉譯。
++	Saved Multichannel	已儲存的多色版
++	Saved a copy as {path}	已將拷貝儲存為 {path}
++	Saved {path}; image assets: {n} in {dir}	已儲存 {path}；影像資產：{n} 個，位於 {dir}
++	Saving…	儲存中…
++	Scale Effects	縮放效果
++	Scale Factor	縮放比例
++	Scale Horizontally	水平縮放
++	Scale Units	縮放單位
++	Scale Vertically	垂直縮放
++	Scaling	縮放
++	Scallops	扇形
++	Script Events Manager	指令碼事件管理員
++	Scroll menu down	向下捲動選單
++	Scroll menu up	向上捲動選單
++	Search commands (⌘K)	搜尋指令 (⌘K)
++	Search commands, tools and panels	搜尋指令、工具和面板
++	Search menus	搜尋選單
++	Second Color Readout	第二顏色讀數
++	Seed	種子
++	Select All Layers	選取全部圖層
++	Select Custom Color…	選取自訂顏色…
++	Select Folder…	選取資料夾…
++	Select Inverse	反轉選取範圍
++	Select Layer	選取圖層
++	Select Layer Under Cursor	選取游標下方的圖層
++	Select Plane	選取平面
++	Select Similar Colors	選取相似顏色
++	Select and Mask	選取並遮住
++	Selected at launch: {backend}	啟動時選用：{backend}
++	Semi Bold	半粗體
++	Sensitivity	靈敏度
++	Sent to the printer ({spooler})	已傳送至印表機 ({spooler})
++	Sepia	深褐色
++	Services	服務
++	Set Colors	設定顏色
++	Set Measurement Scale	設定測量比例
++	Set New Snapshot as Default	將新快照設為預設
++	Set Start Timecode…	設定起始時間碼…
++	Settings	設定
++	Settings:	設定：
++	Sgray	sGray
++	Shadow	陰影
++	Shadow Amount	陰影量
++	Shadow Intensity	陰影強度
++	Shadow Radius	陰影半徑
++	Shadow Tone	陰影色調
++	Shadows/Highlights	陰影/亮部
++	Shallow	淺
++	Shape Blur	形狀模糊
++	Sharpen Amount	銳利化量
++	Sharpen Detail	銳利化細節
++	Sharpen Details	銳利化細節
++	Sharpen Masking	銳利化遮色
++	Sharpen Radius	銳利化半徑
++	Sharpness	銳利度
++	Shear	傾斜
++	Shell Lower	下殼
++	Shell Upper	上殼
++	Shine	光澤
++	Short Lines	短線
++	Short Strokes	短筆畫
++	Shortcut	快速鍵
++	Shortcuts	快速鍵
++	Show All	全部顯示
++	Show Channels in Color	以彩色顯示色版
++	Show Guides  (⌘;)	顯示參考線  (⌘;)
++	Show New Snapshot Dialog by Default	預設顯示新增快照對話框
++	Show Rulers	顯示尺標
++	Show Statistics	顯示統計資料
++	Show the layer's effects  (⌥-click: all layers)	顯示圖層效果  (⌥-按一下：全部圖層)
++	Shutter Speed	快門速度
++	Simple	簡單
++	Simulate Paper	模擬紙張
++	Sine	正弦波
++	Single Word Justification	單字對齊
++	Sketch	素描
++	Skip	略過
++	Slice Options	切片選項
++	Smart Blur	智慧型模糊
++	Smart Sharpen	智慧型銳利化
++	Smoothness	平滑度
++	Smudge Stick	塗抹棒
++	Snap to Grid	靠齊格點
++	Snapshot 1	快照 1
++	Snapshots	快照
++	Snowflakes	雪花
++	Softness	柔和度
++	Software	軟體
++	Software adapter	軟體介面卡
++	Solarized Dark	Solarized 深色
++	Solid Color	純色
++	Solid Front Faces	實心正面
++	Source Channel	來源色版
++	Source Invert	反轉來源
++	Source Layer	來源圖層
++	Source1 Channel	來源 1 色版
++	Source1 Invert	反轉來源 1
++	Source2 Channel	來源 2 色版
++	Source2 Invert	反轉來源 2
++	Source:	來源：
++	Space	空格
++	Spacing:	間距：
++	Sparkle	閃爍
++	Spatter	噴濺
++	Speckle	斑點
++	Speed	速度
++	Spherize	球面化
++	Spin	旋轉
++	Spin Blur	旋轉模糊
++	Split Channels	分割色版
++	Split Toning	分割色調
++	Split at Playhead	在播放磁頭處分割
++	Spot	點
++	Spot Channel	特別色色版
++	Spot Healing	污點修復
++	Spot:	點：
++	Spray Radius	噴灑半徑
++	Sprayed Strokes	噴灑筆畫
++	Sprinkles	灑點
++	Square Size	方形大小
++	Squareness	方正度
++	Squeeze	擠壓
++	Stagger	交錯
++	Stained Glass	彩色玻璃
++	Star	星形
++	Stars	星星
++	Start X	起點 X
++	Start Y	起點 Y
++	Statistics	統計資料
++	Status Bar	狀態列
++	Status Information	狀態資訊
++	Step {step} ({id}) failed: {error}	步驟 {step} ({id}) 失敗：{error}
++	Stippled	點刻
++	Stop For Errors	發生錯誤時停止
++	Stops	色標
++	Strength	強度
++	Stretch	伸展
++	Stroke Color	筆畫顏色
++	Stroke Detail	筆畫細節
++	Stroke Direction	筆畫方向
++	Stroke Length	筆畫長度
++	Stroke Path	筆畫路徑
++	Stroke Pressure	筆畫壓力
++	Stroke Size	筆畫大小
++	Stroke Width	筆畫寬度
++	Strokes	筆畫
++	Stylization	風格化
++	Subject Distance	主體距離
++	Subscript	下標
++	Subtract Shapes at Overlap	重疊處減去形狀
++	Subtract from	減去
++	Subtract from selection  (⌥)	從選取範圍中減去  (⌥)
++	Sumi-e	水墨畫
++	Superscript	上標
++	Supplemental Categories	補充類別
++	Surface Blur	表面模糊
++	Switch Foreground and Background Colors	切換前景色與背景色
++	Symbols	符號
++	Tablet	繪圖板
++	Taper	漸細
++	Target Channel 3	目標色版 3
++	Target Channel 4	目標色版 4
++	Target Channel 5	目標色版 5
++	Target Channel 6	目標色版 6
++	Target Channel 7	目標色版 7
++	Target Channel 8	目標色版 8
++	Target Channel 9	目標色版 9
++	Target Composite Channel	目標複合色版
++	Target X	目標 X
++	Target Y	目標 Y
++	Teal Orange	青綠橙
++	Technology Previews	技術預覽
++	Technology Previews…	技術預覽…
++	Temporary	暫時
++	Text Layer	文字圖層
++	Texture Coverage	紋理覆蓋範圍
++	Texturizer	紋理化
++	Thaw Mask	解凍遮色片
++	The canvas is shown as sRGB. Choose a monitor profile in Edit › Color Settings.	畫布以 sRGB 顯示。請在 編輯 › 色彩設定 中選擇顯示器描述檔。
++	The canvas on {display} is shown as sRGB. Choose a monitor profile in Edit › Color Settings.	{display} 上的畫布以 sRGB 顯示。請在 編輯 › 色彩設定 中選擇顯示器描述檔。
++	The current gradient (pick one in Window › Gradients)	目前的漸層 (請在 視窗 › 漸層 中選擇)
++	The document does not have an embedded colour profile. Working space: {working}.	文件沒有內嵌的色彩描述檔。工作空間：{working}。
++	The document has an embedded colour profile that does not match the working space.\nEmbedded: {embedded}\nWorking: {working}	文件內嵌的色彩描述檔與工作空間不符。\n內嵌：{embedded}\n工作空間：{working}
++	The file could not be opened.	無法開啟檔案。
++	The file could not be saved.	無法儲存檔案。
++	Thickness	厚度
++	This Layer:	此圖層：
++	This Smart Object must be rasterized before proceeding. Its contents will no longer be editable. Rasterize the Smart Object?	此智慧型物件必須先點陣化才能繼續。其內容將無法再編輯。要點陣化智慧型物件嗎？
++	This adjustment ({key}) is kept as imported and can't be edited yet.	此調整 ({key}) 會保持匯入時的狀態，目前尚無法編輯。
++	This fill layer must be rasterized before proceeding. Its fill content will no longer be editable. Rasterize the layer?	此填色圖層必須先點陣化才能繼續。其填色內容將無法再編輯。要點陣化圖層嗎？
++	This layer must be rasterized before proceeding.	此圖層必須先點陣化才能繼續。
++	This session: {reason}	本次工作階段：{reason}
++	This shape layer must be rasterized before proceeding. It will no longer be editable as a shape. Rasterize the shape?	此形狀圖層必須先點陣化才能繼續。它將無法再編輯為形狀。要點陣化形狀嗎？
++	This type layer must be rasterized before proceeding. Its text will no longer be editable. Rasterize the type?	此文字圖層必須先點陣化才能繼續。其文字將無法再編輯。要點陣化文字嗎？
++	Tile Horizontally	水平並排顯示
++	Tile Size	拼貼大小
++	Tile Vertically	垂直並排顯示
++	Tiles	拼貼
++	Tilt	傾斜
++	Tilt-Shift	移軸
++	Time	時間
++	Timecode	時間碼
++	Timing	時序
++	Tint Color	色調顏色
++	Tiny Lens	微型鏡頭
++	Title	標題
++	To	至
++	To Center	至中心
++	Toggle Layer Mask Overlay	切換圖層遮色片覆蓋
++	Toggle reference point	切換參考點
++	Toggle the Brush Settings panel	切換筆刷設定面板
++	Tone Curve	色調曲線
++	Tool Options	工具選項
++	Toolbars	工具列
++	Torn Edges	撕裂邊緣
++	Total Ink	油墨總量
++	Trace Contour	描繪輪廓
++	Transformation	變形
++	Transition	轉場
++	Transmission Reference	傳輸參考
++	Transparency Shapes Layer	透明度形狀圖層
++	Trap	陷印
++	Tree	樹木
++	Trim	裁切
++	Turbulent	紊流
++	Twirl	扭轉
++	Twirl Clockwise	順時針扭轉
++	Twirl Counterclockwise	逆時針扭轉
++	Twist	扭曲
++	URLs	網址
++	Ultra Bold	特粗體
++	Ultra Light	特細體
++	Unaltered	未變更
++	Uncached Refresh	不使用快取重新整理
++	Uncoated CMYK	非塗佈紙 CMYK
++	Undefined Areas	未定義區域
++	Underpainting	底畫
++	Underwater	水中
++	Ungroup	解散群組
++	Uniform	均勻
++	Unite Shapes at Overlap	重疊處聯集形狀
++	Unix	Unix
++	Unknown	未知
++	Unlink	取消連結
++	Unlock	解除鎖定
++	Unlocked	已解除鎖定
++	Unsaved Changes	未儲存的變更
++	Unsharp Mask	遮色片銳利化調整
++	Unsupported file format	不支援的檔案格式
++	Unsupported format	不支援的格式
++	Up	上
++	Update	更新
++	Update Layer Comp	更新圖層構圖
++	Update and Restart	更新並重新啟動
++	Updates	更新
++	Upper	上
++	Urgency	緊急程度
++	Use Custom Color	使用自訂顏色
++	Use File › Open to open an image.	請使用 檔案 › 開啟 來開啟影像。
++	Use Selection In Source	使用來源中的選取範圍
++	Use Selection In Target	使用目標中的選取範圍
++	Uses the foreground and background colors.	使用前景色與背景色。
++	Vanishing Point	消失點
++	Variable Data Sets	變數資料集
++	Vector Mask Hides Effects	向量遮色片隱藏效果
++	Vertical Distortion	垂直扭曲
++	Vertical Only	僅垂直
++	Vertical Type Tool	直式文字工具
++	Video Frames to Layers	影片影格轉圖層
++	View menu	檢視選單
++	Vignette Amount	暈影量
++	Vignette Feather	暈影羽化
++	Vignette Highlights	暈影亮部
++	Vignette Midpoint	暈影中點
++	Vignette Roundness	暈影圓度
++	Vignette Style	暈影樣式
++	Vine Color	藤蔓顏色
++	Vine With Flowers	有花的藤蔓
++	Vine With Leaves	有葉的藤蔓
++	Violent	劇烈
++	W:	寬：
++	WIA Support	WIA 支援
++	Wand	魔術棒
++	Warm	暖色
++	Warming Filter (81)	加溫濾鏡 (81)
++	Warming Filter (85)	加溫濾鏡 (85)
++	Warming Filter (LBA)	加溫濾鏡 (LBA)
++	Warming L B A	加溫濾鏡 (LBA)
++	Warming81	加溫濾鏡 (81)
++	Warming85	加溫濾鏡 (85)
++	Warmth	暖度
++	Warning	警告
++	Warp Text	彎曲文字
++	Water Paper	水彩紙
++	Watercolor	水彩
++	Watercolour look: lighter interior, darker rims.	水彩效果：內部較淺，邊緣較深。
++	Wave	波浪
++	Wavelength Max	波長 (最大)
++	Wavelength Min	波長 (最小)
++	Waves	波浪
++	Web Color	網頁顏色
++	Web Photo Gallery…	網頁相片藝廊…
++	Wetness	濕度
++	White Clip	白色剪裁
++	White Intensity	白色強度
++	White Is High	白色為高
++	Whole Word	全字比對
++	Wide Blurry	寬模糊
++	Wide Gamut RGB	Wide Gamut RGB
++	Wide Sharp	寬銳利
++	Width and Height	寬度與高度
++	Wind	風
++	Window renderer: {renderer}	視窗轉譯器：{renderer}
++	Word Spacing	字詞間距
++	Working	使用中
++	Working Cmyk	使用中的 CMYK
++	Working Gray	使用中的灰階
++	Working Gray Plate	使用中的灰階版
++	Working Rgb	使用中的 RGB
++	Working Space	工作空間
++	Working Spaces	工作空間
++	Working-cmyk	使用中的 CMYK
++	Workspaces	工作區
++	Wrap	環繞
++	X	X
++	Y	Y
++	ZigZag	鋸齒
++	Zigzag	鋸齒
++	Zoom In (hold, drag to scrub)	放大 (按住並拖移以連續調整)
++	Zoom Out (hold)	縮小 (按住)
++	auto	自動
++	blue	藍色
++	brushes	筆刷
++	fallback	備援
++	gradients	漸層
++	gray	灰色
++	green	綠色
++	layer mask	圖層遮色片
++	manual	手動
++	none	無
++	off	關
++	on	開
++	orange	橘色
++	previous reading kept; the last re-read failed: {reason}	已保留先前的讀取結果；上次重新讀取失敗：{reason}
++	red	紅色
++	sRGB	sRGB
++	sRGB IEC61966-2.1	sRGB IEC61966-2.1
++	shortcut	快速鍵
++	unknown	未知
++	unknown type	未知類型
++	vector mask	向量遮色片
++	violet	紫羅蘭色
++	yellow	黃色
++	{index} of {total}	第 {index} 個，共 {total} 個
++	{label} is not available: {reason}	無法使用 {label}：{reason}
++	{message} (notes: {n}; {warning})	{message} (附註：{n}；{warning})
++	{shortcut} assigned.	已指定 {shortcut}。
++	{shortcut} is already in use by {commands} and will be removed from it when you click OK.	{shortcut} 已被 {commands} 使用，按一下「確定」後將從該項目移除。
++	{verb} {mask} {layer}	{verb} {mask} {layer}
++	{zoom}%	{zoom}%
++	↑↓ navigate   ↵ run   esc close	↑↓ 瀏覽   ↵ 執行   esc 關閉
++	✓ Color Indicates Masked Areas	✓ 色彩指示遮色片區域
++	✓ Color Indicates Selected Areas	✓ 色彩指示選取區域
++@id	edit.clear	清除
++@id	edit.purge.undo	還原
++@id	edit.stroke	筆畫…
++@id	edit.transform.scale	縮放
++@id	file.close	關閉
++@id	filter.sharpen.sharpen	銳利化
++@id	layer.layerMask.apply	套用圖層遮色片
++@id	select.all	全選
++@plural	Imported {n} brush from {file}|Imported {n} brushes from {file}	已從 {file} 匯入 {n} 個筆刷
++@plural	Imported {n} gradient from {file}|Imported {n} gradients from {file}	已從 {file} 匯入 {n} 個漸層
++@plural	Imported {n} pattern from {file}|Imported {n} patterns from {file}	已從 {file} 匯入 {n} 個圖樣
++@plural	{n} document|{n} documents	{n} 份文件
++@plural	{n} pixel|{n} pixels	{n} 像素
++cameraRaw	Aqua	水藍
++cameraRaw	Balance	平衡
++cameraRaw	Before (Y)	之前 (Y)
++cameraRaw	Blue	藍色
++cameraRaw	Camera Raw ({name})	Camera Raw ({name})
++cameraRaw	Camera Raw Filter ({layer})	Camera Raw 濾鏡 ({layer})
++cameraRaw	Camera Raw isn't open	Camera Raw 未開啟
++cameraRaw	Cancel	取消
++cameraRaw	Cancelled opening {name}	已取消開啟 {name}
++cameraRaw	Cancelled {label}	已取消 {label}
++cameraRaw	Clarity	清晰度
++cameraRaw	Color	顏色
++cameraRaw	Color Detail	色彩細節
++cameraRaw	Color Grading	色彩分級
++cameraRaw	Color Mixer	色彩混合器
++cameraRaw	Color Priority	色彩優先
++cameraRaw	Contrast	對比
++cameraRaw	Curve	曲線
++cameraRaw	Dehaze	去除霧霾
++cameraRaw	Detail	細節
++cameraRaw	Developing {name}	正在顯影 {name}
++cameraRaw	Effects	效果
++cameraRaw	Exposure	曝光度
++cameraRaw	Feather	羽化
++cameraRaw	Full-resolution preview unavailable	無法使用完整解析度預覽
++cameraRaw	Global	全域
++cameraRaw	Grain	顆粒
++cameraRaw	Green	綠色
++cameraRaw	Highlight Clipping Warning (O)	亮部剪裁警告 (O)
++cameraRaw	Highlight Priority	亮部優先
++cameraRaw	Highlights	亮部
++cameraRaw	Hue	色相
++cameraRaw	Load Settings…	載入設定…
++cameraRaw	Load settings from a Camera Raw .xmp file	從 Camera Raw .xmp 檔載入設定
++cameraRaw	Loaded Camera Raw settings from {file}	已從 {file} 載入 Camera Raw 設定
++cameraRaw	Luminance	明亮度
++cameraRaw	Luminance Detail	明亮度細節
++cameraRaw	Magenta	洋紅
++cameraRaw	Midpoint	中點
++cameraRaw	Midtones	中間調
++cameraRaw	Noise Reduction	減少雜訊
++cameraRaw	OK	確定
++cameraRaw	Open	開啟
++cameraRaw	Opened {name}	已開啟 {name}
++cameraRaw	Orange	橘色
++cameraRaw	Paint Overlay	繪製覆蓋
++cameraRaw	Purple	紫色
++cameraRaw	Radius	半徑
++cameraRaw	Red	紅色
++cameraRaw	Roughness	粗糙度
++cameraRaw	Roundness	圓度
++cameraRaw	Saturation	飽和度
++cameraRaw	Save Settings…	儲存設定…
++cameraRaw	Save these settings as a Camera Raw .xmp file	將這些設定儲存為 Camera Raw .xmp 檔
++cameraRaw	Shadow Clipping Warning (U)	陰影剪裁警告 (U)
++cameraRaw	Shadows	陰影
++cameraRaw	Sharpening	銳利化
++cameraRaw	Show Lab Color Readouts	顯示 Lab 顏色讀數
++cameraRaw	Show Red at 3 o'clock	紅色顯示於 3 點鐘方向
++cameraRaw	Show Selected Region	顯示選取區域
++cameraRaw	Show Skin Tone Indicator	顯示膚色指示線
++cameraRaw	Show Vectorscope	顯示向量示波器
++cameraRaw	Size	大小
++cameraRaw	Temperature	色溫
++cameraRaw	Texture	紋理
++cameraRaw	Tone Histogram	色調直方圖
++cameraRaw	Vibrance	自然飽和度
++cameraRaw	Vignetting	暈影
++cameraRaw	White Balance: As Shot	白平衡：原拍攝設定
++cameraRaw	Yellow	黃色
++colorRange	Invert	反轉
++document	Orientation	方向
++layerLabel	Magenta	洋紅
++layerLabel	No Color	無顏色
++layerLabel	Red	紅色
++layers	Fill	填滿
++layers	Fill:	填滿：
++navigator	Zoom	縮放
++shape	Appearance	外觀
++	No matching fonts	找不到符合的字型
++	Black Body	黑體輻射
++	Spectrum	光譜
++	Skin Tones	膚色
++	Float Tab Group	浮動標籤群組
++	System Mac	系統 Mac
++	System Windows	系統 Windows
+diff --git a/crates/ui-egui/src/links.rs b/crates/ui-egui/src/links.rs
+index 2042d99..b07bb4e 100644
+--- a/crates/ui-egui/src/links.rs
++++ b/crates/ui-egui/src/links.rs
+@@ -6,11 +6,11 @@ use serde_json::{Value, json};
+ 
+ use crate::PhotocraftApp;
+ 
+-pub const DISCORD: &str = "https://discord.gg/artcraft";
+-pub const ARTCRAFT_WEBSITE: &str = "https://getartcraft.com";
+-pub const APP_PAGE: &str = "https://getartcraft.com/apps/photocraft";
+-pub const GITHUB: &str = "https://github.com/storytold/photocraft";
+-pub const ISSUES: &str = "https://github.com/storytold/photocraft/issues";
++pub const DISCORD: &str = "https://achir1015.github.io/xiaoke-photo/";
++pub const ARTCRAFT_WEBSITE: &str = "https://achir1015.github.io/xiaoke-photo/";
++pub const APP_PAGE: &str = "https://achir1015.github.io/xiaoke-photo/";
++pub const GITHUB: &str = "https://github.com/achir1015/xiaoke-photo";
++pub const ISSUES: &str = "https://github.com/achir1015/xiaoke-photo/issues";
+ 
+ /// Help-menu link commands: (id, url). Labels live in `menus::UI_COMMANDS`.
+ pub const COMMANDS: &[(&str, &str)] =
+diff --git a/crates/ui-egui/src/menus/native_menu.rs b/crates/ui-egui/src/menus/native_menu.rs
+index 4dad63c..0b6b821 100644
+--- a/crates/ui-egui/src/menus/native_menu.rs
++++ b/crates/ui-egui/src/menus/native_menu.rs
+@@ -28,7 +28,7 @@ use crate::PhotocraftApp;
+ use crate::i18n::{Lang, tr, tr_id};
+ use crate::menus::MenuItem;
+ 
+-pub const APP_NAME: &str = "PhotoCraft";
++pub const APP_NAME: &str = "小柯圖像編輯";
+ 
+ #[derive(Clone, Debug, Default, PartialEq)]
+ pub struct MenuBar {
+diff --git a/crates/ui-egui/src/panels/title_bar.rs b/crates/ui-egui/src/panels/title_bar.rs
+index 6586b98..ecf4a28 100644
+--- a/crates/ui-egui/src/panels/title_bar.rs
++++ b/crates/ui-egui/src/panels/title_bar.rs
+@@ -47,8 +47,8 @@ pub fn title_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+             let title = app
+                 .session
+                 .active()
+-                .map(|d| format!("{}{}", if show_name { d.doc.name.as_str() } else { "PhotoCraft" }, if d.is_dirty() { "  •" } else { "" }))
+-                .unwrap_or_else(|| "PhotoCraft".into());
++                .map(|d| format!("{}{}", if show_name { d.doc.name.as_str() } else { "小柯圖像編輯" }, if d.is_dirty() { "  •" } else { "" }))
++                .unwrap_or_else(|| "小柯圖像編輯".into());
+             // The menus and the far-end controls are laid out first; the title is centred in
+             // whatever room is left between them (`free`, left to right: menus then controls, or
+             // controls then menus in a right-to-left UI), shortened or dropped rather than drawn
+@@ -167,9 +167,9 @@ pub fn system_title_bar(app: &PhotocraftApp) -> bool {
+ /// drops out and only the app name (and the `*`) remains (#5037).
+ pub fn window_title(app: &PhotocraftApp) -> String {
+     if !app.session.prefs().interface.show_file_name_in_title {
+-        return format!("{}PhotoCraft", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" });
++        return format!("{}小柯圖像編輯", if app.session.active().is_some_and(|d| d.is_dirty()) { "*" } else { "" });
+     }
+-    app.session.active().map(|d| format!("{}{} \u{2014} PhotoCraft", if d.is_dirty() { "*" } else { "" }, d.doc.name)).unwrap_or_else(|| "PhotoCraft".into())
++    app.session.active().map(|d| format!("{}{} \u{2014} 小柯圖像編輯", if d.is_dirty() { "*" } else { "" }, d.doc.name)).unwrap_or_else(|| "小柯圖像編輯".into())
+ }
+ 
+ /// Keep the OS window title (and the taskbar / Alt-Tab entry) on the active file. Sends

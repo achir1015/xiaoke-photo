@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>小柯機器人圖像編輯助手</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <img id="logo" src="../../build/icon.png" alt="小柯機器人圖示">
+  <strong id="brand">小柯機器人圖像編輯助手</strong>
+  <nav id="quick">
+    <button data-menu="file.new" title="新增文件">新增</button>
+    <button data-menu="file.open" title="開啟圖片或 PSD">開啟</button>
+    <button data-menu="file.save" title="儲存專案">儲存</button>
+    <button data-menu="edit.undo" title="復原">復原</button>
+    <button data-menu="edit.redo" title="重做">重做</button>
+  </nav>
+  <span class="grow"></span>
+  <nav id="system" aria-label="系統工具">
+    <button id="btnPanel" title="顯示或隱藏右側的 AI 與插件面板">AI 與插件</button>
+    <button id="btnGuide" title="語音動畫教學">使用教學</button>
+    <button id="btnUpdate" title="檢查新版本">系統更新</button>
+    <button id="btnAbout" title="關於這個程式">關於</button>
+    <button id="btnKey" title="設定 OpenAI API 金鑰"><i id="keyDot"></i>OpenAI 金鑰</button>
+  </nav>
+</header>
+<main id="work">
+  <div id="stage">
+    <iframe id="engine" src="../../engine/index.html" title="影像編輯引擎" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+    <div id="splash">
+      <img src="../../build/icon.png" alt="">
+      <p id="splashText">小柯正在準備畫布…</p>
+    </div>
+  </div>
+  <aside id="panel"></aside>
+</main>
+<div id="toast" role="status"></div>
+<div id="busy" hidden><div class="spin"></div><p id="busyText"></p><button id="busyCancel" hidden>取消</button></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

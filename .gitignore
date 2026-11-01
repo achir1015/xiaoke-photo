@@ -1,0 +1,12 @@
+node_modules/
+dist/
+e2e/out/
+*.log
+android/*.jks
+android/local.properties
+engine/
+mobile/www/
+assets-src/
+fonts-build/
+android/build/
+ios/build/

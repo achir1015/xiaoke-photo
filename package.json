@@ -1,0 +1,86 @@
+{
+  "name": "xiaoke-photo",
+  "productName": "小柯機器人圖像編輯助手",
+  "version": "1.0.0",
+  "description": "小柯機器人圖像編輯助手：全繁體中文的圖層式影像編輯器（圖層、遮色片、調整圖層、PSD），內建 OpenAI 文生圖、AI 移除人物／物件／浮水印、人像修圖、摳圖特效、降噪放大，語音動畫教學與自動更新",
+  "main": "src/main/main.js",
+  "author": {
+    "name": "吳玉柱",
+    "email": "achir1015@gmail.com"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/",
+    "e2e": "node e2e/smoke.mjs",
+    "icon": "python scripts/make_icon.py",
+    "engine": "node scripts/fetch-engine.mjs",
+    "dist:win": "electron-builder --win nsis portable --x64 --publish never",
+    "dist:mac": "electron-builder --mac dmg --publish never"
+  },
+  "build": {
+    "appId": "com.achir.xiaokephoto",
+    "productName": "小柯機器人圖像編輯助手",
+    "artifactName": "XiaokePhoto-${version}-${os}-${arch}.${ext}",
+    "copyright": "Copyright © 2026 吳玉柱",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "engine/**/*",
+      "build/icon.png",
+      "build/robot.png",
+      "package.json",
+      "NOTICE.md",
+      "!e2e/**",
+      "!scripts/**",
+      "!test/**"
+    ],
+    "fileAssociations": [
+      { "ext": "psd", "name": "Photoshop 文件" },
+      { "ext": "pcraft", "name": "小柯圖像專案" }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "executableName": "XiaokePhoto"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "小柯機器人圖像編輯助手",
+      "uninstallDisplayName": "小柯機器人圖像編輯助手",
+      "language": "1028",
+      "installerLanguages": [
+        "zh_TW"
+      ]
+    },
+    "portable": {
+      "artifactName": "XiaokePhoto-${version}-win-x64-portable.${ext}"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon.png",
+      "category": "public.app-category.graphics-design",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "identity": "-"
+    },
+    "dmg": {
+      "title": "小柯機器人圖像編輯助手 ${version}"
+    },
+    "npmRebuild": false
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "electron-builder": "26.15.6",
+    "playwright-core": "^1.48.2"
+  }
+}
